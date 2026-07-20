@@ -3,14 +3,14 @@
 import { spawn } from "node:child_process"
 import fs from "node:fs"
 import readline from "node:readline"
-import { evaluatePolicy } from "@sakra-trust/mcp-sdk"
+import { evaluatePolicy, requestApproval } from "@sakra-trust/mcp-sdk"
 
 // Simple CLI arguments parser
 const args = process.argv.slice(2)
-const gatewayUrl = getArg("--gateway-url") || "http://localhost:8787"
-const clientId = getArg("--client-id") || ""
-const clientSecret = getArg("--client-secret") || ""
-const _agentId = getArg("--agent-id") || ""
+const gatewayUrl = getArg("--gateway-url") || process.env.SAKRA_GATEWAY_URL || "http://localhost:8787"
+const clientId = getArg("--client-id") || process.env.SAKRA_CLIENT_ID || ""
+const clientSecret = getArg("--client-secret") || process.env.SAKRA_CLIENT_SECRET || ""
+const _agentId = getArg("--agent-id") || process.env.SAKRA_AGENT_ID || ""
 const enforcement = getArg("--enforcement") || "local-first"
 const localPolicyPath = getArg("--local-policy") || ""
 const targetCommand = getArg("--target-command") || ""
@@ -68,10 +68,15 @@ if (child.stdout) {
   })
 }
 
+// Process messages sequentially in FIFO order to preserve JSON-RPC message ordering and bound in-flight approvals.
+let messageQueue: Promise<void> = Promise.resolve()
+
 rl.on("line", (line) => {
-  processMessage(line).catch((err) => {
-    console.error("[SÄKRA Proxy] Error processing message:", err)
-  })
+  messageQueue = messageQueue
+    .then(() => processMessage(line))
+    .catch((err) => {
+      console.error("[SÄKRA Proxy] Error processing message:", err)
+    })
 })
 
 async function processMessage(line: string) {
@@ -115,111 +120,36 @@ async function processMessage(line: string) {
       }
 
       // 2. Request Human approval
-      try {
-        // Authenticate
-        const tokenRes = await fetch(`${gatewayUrl}/oauth/token`, {
-          method: "POST",
-          headers: {
-            Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: "grant_type=client_credentials",
-        })
+      const outcome = await requestApproval({
+        gatewayUrl,
+        clientId,
+        clientSecret,
+        actionType: name,
+        params: handlerArgs,
+        actionDescription: `Authorize action '${name}' with parameters: ${JSON.stringify(handlerArgs)}`,
+      })
 
-        if (!tokenRes.ok) {
-          throw new Error(`Authentication failed (${tokenRes.status})`)
+      if (outcome.outcome === "approved") {
+        if (child.stdin) {
+          child.stdin.write(`${line}\n`)
         }
-
-        const { access_token } = (await tokenRes.json()) as {
-          access_token: string
-        }
-
-        // Request challenge
-        const challengeRes = await fetch(`${gatewayUrl}/action/request`, {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${access_token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            actionType: name,
-            params: handlerArgs,
-            actionDescription: `Authorize action '${name}' with parameters: ${JSON.stringify(handlerArgs)}`,
-          }),
-        })
-
-        if (!challengeRes.ok) {
-          const errBody = (await challengeRes.json().catch(() => ({ error: undefined }))) as {
-            error?: string
-          }
-          throw new Error(errBody.error ?? `Failed challenge creation (${challengeRes.status})`)
-        }
-
-        const { nonce } = (await challengeRes.json()) as { nonce: string }
-
-        // Poll status
-        let status = "PENDING"
-        const pollIntervalMs = 2000
-        const maxPollAttempts = 60
-        let attempts = 0
-
-        while (status === "PENDING" && attempts < maxPollAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
-          attempts++
-
-          const checkRes = await fetch(`${gatewayUrl}/action/status/${nonce}`, {
-            headers: {
-              Authorization: `Bearer ${access_token}`,
-            },
-          })
-
-          if (checkRes.ok) {
-            const checkData = (await checkRes.json()) as { status: string }
-            status = checkData.status
-          }
-        }
-
-        if (status === "APPROVED") {
-          // Consume approved challenge
-          const consumeRes = await fetch(`${gatewayUrl}/action/consume`, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${access_token}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              nonce,
-              actionType: name,
-              params: handlerArgs,
-            }),
-          })
-
-          if (!consumeRes.ok) {
-            throw new Error(`Failed to consume signature challenge`)
-          }
-
-          // Forward to target tool
-          if (child.stdin) {
-            child.stdin.write(`${line}\n`)
-          }
-        } else {
-          const response = {
-            jsonrpc: "2.0",
-            id,
-            error: {
-              code: -32603,
-              message: `Security Violation: Action '${name}' was rejected or timed out (status: ${status}).`,
-            },
-          }
-          process.stdout.write(`${JSON.stringify(response)}\n`)
-        }
-      } catch (err) {
+      } else if (outcome.outcome === "refused") {
         const response = {
           jsonrpc: "2.0",
           id,
           error: {
             code: -32603,
-            message: `SÄKRA Gateway Error: ${(err as Error).message}`,
+            message: `Security Violation: ${outcome.reason}`,
+          },
+        }
+        process.stdout.write(`${JSON.stringify(response)}\n`)
+      } else {
+        const response = {
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: -32603,
+            message: `SÄKRA Gateway Error: ${outcome.reason}`,
           },
         }
         process.stdout.write(`${JSON.stringify(response)}\n`)
