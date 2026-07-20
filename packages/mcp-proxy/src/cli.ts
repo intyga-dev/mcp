@@ -68,10 +68,30 @@ if (child.stdout) {
   })
 }
 
-// Process messages sequentially in FIFO order to preserve JSON-RPC message ordering and bound in-flight approvals.
+// Gated tool calls run one at a time, in FIFO order: two mutating calls must not be reordered, and
+// serialising them also caps how many approval prompts a runaway agent can raise at once.
 let messageQueue: Promise<void> = Promise.resolve()
 
+/** Does this line need the approval gate at all? Unparseable lines don't — the target server decides. */
+function isToolCall(line: string): boolean {
+  try {
+    return (JSON.parse(line) as { method?: string }).method === "tools/call"
+  } catch {
+    return false
+  }
+}
+
 rl.on("line", (line) => {
+  // Everything that is NOT a tool call bypasses the queue. A pending approval can block for up to
+  // two minutes, and clients time individual requests out far sooner than that — queueing
+  // `initialize`, `ping` and the `*/list` methods behind a human decision would let the client
+  // conclude the server is dead and tear down the session, abandoning the very approval it was
+  // waiting for. None of these mutate anything, so letting them overtake a pending call is safe.
+  if (!isToolCall(line)) {
+    child.stdin?.write(`${line}\n`)
+    return
+  }
+
   messageQueue = messageQueue
     .then(() => processMessage(line))
     .catch((err) => {

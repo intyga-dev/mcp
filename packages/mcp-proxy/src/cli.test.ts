@@ -117,6 +117,40 @@ test("an action missing from the policy is not forwarded on its own authority", 
   assert.doesNotMatch(out, /"method":"tools\/call"/)
 })
 
+test("protocol traffic is not stuck behind a pending approval", async () => {
+  // The gated call blocks for up to two minutes waiting for a human. If `initialize`, `ping` and
+  // `tools/list` queued behind it, the client would time them out and could tear down the session —
+  // abandoning the approval it was waiting for. They must overtake it; none of them mutate anything.
+  const gated = rpc("tools/call", { name: "unlisted_action", arguments: {} }, 1)
+  const out = await runProxy([gated, rpc("initialize", undefined, 2), rpc("ping", undefined, 3)], {
+    policy: policyFile([{ action: "something_else", effect: "allow" }]),
+  })
+
+  assert.match(out, /"method":"initialize"/, "initialize was blocked behind the pending approval")
+  assert.match(out, /"method":"ping"/, "ping was blocked behind the pending approval")
+  // The gated call itself is still waiting on a gateway that isn't there, so it must NOT be through.
+  assert.doesNotMatch(out, /"method":"tools\/call"/)
+})
+
+test("tool calls reach the target in the order they were sent", async () => {
+  // Bypassing the queue is only safe for non-tool traffic — tool calls must stay ordered relative to
+  // each other, since two mutating actions arriving out of order is a correctness bug.
+  //
+  // Note this checks ordering, not blocking. Proving that a *pending* approval holds the next tool
+  // call back needs a gateway that keeps a challenge open; with none reachable the first call fails
+  // fast, so that half of the contract is only exercised against a live gateway (see e2e-roundtrip).
+  const out = await runProxy(
+    [
+      rpc("tools/call", { name: "read_report", arguments: { seq: 1 } }, 1),
+      rpc("tools/call", { name: "read_report", arguments: { seq: 2 } }, 2),
+      rpc("tools/call", { name: "read_report", arguments: { seq: 3 } }, 3),
+    ],
+    { policy: policyFile([{ action: "read_report", effect: "allow" }]) },
+  )
+  const order = [...out.matchAll(/"seq":(\d)/g)].map((m) => m[1])
+  assert.deepEqual(order, ["1", "2", "3"], `tool calls arrived out of order: ${out}`)
+})
+
 test("gateway-enforced mode ignores a local allow rule", async () => {
   const line = rpc("tools/call", { name: "read_report", arguments: {} })
   const out = await runProxy([line], {
