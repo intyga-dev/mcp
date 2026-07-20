@@ -1,0 +1,13 @@
+{
+  "name": "sakra-mcp-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm --filter @sakra-trust/mcp-sdk build",
+    "typecheck": "pnpm --recursive run typecheck"
+  }
+}
