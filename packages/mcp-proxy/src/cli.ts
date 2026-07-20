@@ -3,16 +3,7 @@
 import { spawn } from "node:child_process"
 import fs from "node:fs"
 import readline from "node:readline"
-
-interface Rule {
-  action: string
-  maxAmount?: number
-  effect?: "allow" | "deny" | "require_approval"
-}
-
-interface PolicyManifest {
-  rules?: Rule[]
-}
+import { evaluatePolicy } from "@sakra-trust/mcp-sdk"
 
 // Simple CLI arguments parser
 const args = process.argv.slice(2)
@@ -96,38 +87,12 @@ async function processMessage(line: string) {
       const handlerArgs = json.params?.arguments || {}
       const id = json.id
 
-      // 1. Evaluate policy
-      let decision: "allow" | "deny" | "require_approval" = "require_approval"
-
-      if (enforcement === "local-first" && localPolicyJson) {
-        try {
-          const manifest = JSON.parse(localPolicyJson) as PolicyManifest
-          const rules = manifest.rules || []
-          let matched = false
-          for (const rule of rules) {
-            if (rule.action === name) {
-              matched = true
-              if (rule.maxAmount !== undefined && handlerArgs.amount !== undefined) {
-                const requestedAmount = Number(handlerArgs.amount)
-                if (requestedAmount > rule.maxAmount) {
-                  decision =
-                    rule.effect === "allow" ? "require_approval" : (rule.effect ?? "require_approval")
-                } else {
-                  decision = rule.effect ?? "require_approval"
-                }
-              } else {
-                decision = rule.effect ?? "require_approval"
-              }
-              break
-            }
-          }
-          if (!matched) {
-            decision = "require_approval"
-          }
-        } catch {
-          decision = "require_approval"
-        }
-      }
+      // 1. Evaluate policy — the same gate the in-process wrapper uses, so the two enforcement paths
+      //    cannot reach different verdicts for the same call.
+      const decision = evaluatePolicy(name, handlerArgs, {
+        enforcement: enforcement as "local-first" | "gateway-enforced",
+        localPolicyJson,
+      })
 
       if (decision === "allow") {
         if (child.stdin) {

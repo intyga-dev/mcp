@@ -1,4 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { evaluatePolicy } from "./policy.js"
+
+export { evaluatePolicy } from "./policy.js"
+export type { PolicyContext, PolicyDecision, PolicyManifest, PolicyRule } from "./policy.js"
 
 export interface SakraConfig {
   gatewayUrl: string
@@ -23,43 +27,7 @@ export function sakrafyServer(server: McpServer, config: SakraConfig) {
 
     const secureHandler = async (handlerArgs: Record<string, unknown>, extra: unknown): Promise<unknown> => {
       // 1. Evaluate policy (local-first check)
-      let decision: "allow" | "deny" | "require_approval" = "require_approval"
-
-      if (config.enforcement === "local-first" && config.localPolicyJson) {
-        try {
-          const manifest = JSON.parse(config.localPolicyJson) as {
-            rules?: Array<{
-              action: string
-              maxAmount?: number
-              effect?: "allow" | "deny" | "require_approval"
-            }>
-          }
-          const rules = manifest.rules || []
-          let matched = false
-          for (const rule of rules) {
-            if (rule.action === name) {
-              matched = true
-              if (rule.maxAmount !== undefined && handlerArgs.amount !== undefined) {
-                const requestedAmount = Number(handlerArgs.amount)
-                if (requestedAmount > rule.maxAmount) {
-                  decision =
-                    rule.effect === "allow" ? "require_approval" : (rule.effect ?? "require_approval")
-                } else {
-                  decision = rule.effect ?? "require_approval"
-                }
-              } else {
-                decision = rule.effect ?? "require_approval"
-              }
-              break
-            }
-          }
-          if (!matched) {
-            decision = "require_approval"
-          }
-        } catch {
-          decision = "require_approval"
-        }
-      }
+      const decision = evaluatePolicy(name, handlerArgs, config)
 
       // If the policy allows, execute the tool immediately
       if (decision === "allow") {
