@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit",
     "simulate": "tsx src/simulate.ts",
     "test": "tsx --test 'src/**/*.test.ts'",
-    "test:coverage": "tsx --test --experimental-test-coverage 'src/**/*.test.ts'"
+    "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-lines=96 --test-coverage-branches=94 --test-coverage-functions=91 'src/**/*.test.ts'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

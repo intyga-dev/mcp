@@ -10,7 +10,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "tsx --test 'src/**/*.test.ts'",
-    "test:coverage": "tsx --test --experimental-test-coverage 'src/**/*.test.ts'"
+    "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-lines=97 --test-coverage-branches=97 --test-coverage-functions=97 'src/**/*.test.ts'"
   },
   "devDependencies": {
     "@sakra-trust/config": "workspace:*",
