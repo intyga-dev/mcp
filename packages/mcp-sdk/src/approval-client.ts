@@ -1,6 +1,6 @@
 // The out-of-band approval round trip: authenticate, raise a challenge, wait for the human, then
 // consume it exactly once before the action runs. Both enforcement paths — the in-process wrapper
-// (`sakrafyServer`) and the stdio proxy — share this, because when it existed twice the two copies
+// (`intygafyServer`) and the stdio proxy — share this, because when it existed twice the two copies
 // had already drifted and the fragile polling loop had to be found and fixed twice.
 //
 // Fail-closed throughout: this returns "approved" only when a human actually signed AND the
@@ -40,7 +40,7 @@ async function getToken(req: ApprovalRequest): Promise<string> {
     },
     body: "grant_type=client_credentials",
   })
-  if (!res.ok) throw new Error(`Failed to authenticate with SÄKRA gateway (status ${res.status})`)
+  if (!res.ok) throw new Error(`Failed to authenticate with Intyga gateway (status ${res.status})`)
   return ((await res.json()) as { access_token: string }).access_token
 }
 

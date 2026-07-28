@@ -1,9 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { z } from "zod"
-import { sakrafyServer } from "./index.js"
+import { intygafyServer } from "./index.js"
 
 async function runSimulation() {
-  console.log("=== SÄKRA MCP SDK Simulator ===")
+  console.log("=== Intyga MCP SDK Simulator ===")
 
   const server = new McpServer({ name: "simulator-server", version: "1.0.0" })
 
@@ -62,13 +62,13 @@ async function runSimulation() {
     ],
   })
 
-  // Sakrafy the server using the SDK. Local simulation defaults; override via env to point at a real
+  // Intygafy the server using the SDK. Local simulation defaults; override via env to point at a real
   // gateway. Never hardcode a client secret in your own integration — read it from the environment.
-  sakrafyServer(server, {
-    gatewayUrl: process.env.SAKRA_GATEWAY_URL || "http://localhost:8787",
-    clientId: process.env.SAKRA_CLIENT_ID || "did:sakra:client-dev",
-    clientSecret: process.env.SAKRA_CLIENT_SECRET || "dev_secret_key",
-    agentId: process.env.SAKRA_AGENT_ID || "did:sakra:agent-001",
+  intygafyServer(server, {
+    gatewayUrl: process.env.INTYGA_GATEWAY_URL || "http://localhost:8787",
+    clientId: process.env.INTYGA_CLIENT_ID || "did:intyga:client-dev",
+    clientSecret: process.env.INTYGA_CLIENT_SECRET || "dev_secret_key",
+    agentId: process.env.INTYGA_AGENT_ID || "did:intyga:agent-001",
     enforcement: "local-first",
     localPolicyJson,
   })

@@ -1,14 +1,14 @@
-# SÄKRA for MCP — Human Approval for AI Agent Tool Calls
+# Intyga for MCP — Human Approval for AI Agent Tool Calls
 
 Client-side tooling that gates an AI agent's [Model Context Protocol](https://modelcontextprotocol.io)
 tool calls behind a cryptographically-signed human approval. A leaked credential or a prompt-injected
 agent can *request* a high-risk action — it can never execute it alone.
 
-**MFA verifies who you are. SÄKRA verifies what you are doing.**
+**MFA verifies who you are. Intyga verifies what you are doing.**
 
-These packages run on your side and call your SÄKRA gateway to broker the approval; SÄKRA witnesses
+These packages run on your side and call your Intyga gateway to broker the approval; Intyga witnesses
 the sign-off without ever holding your keys or executing your tools. The gateway, the tamper-evident
-witness ledger, and server-side policy enforcement are hosted by SÄKRA.
+witness ledger, and server-side policy enforcement are hosted by Intyga.
 
 ---
 
@@ -16,23 +16,23 @@ witness ledger, and server-side policy enforcement are hosted by SÄKRA.
 
 | Package | Purpose |
 | :--- | :--- |
-| `@sakra-trust/mcp-sdk` | Middleware that wraps an existing MCP server so every `server.tool` call is gated. |
-| `@sakra-trust/mcp-proxy` | A stdio proxy that enforces policy in front of an MCP server, no code changes. |
+| `@intyga/mcp-sdk` | Middleware that wraps an existing MCP server so every `server.tool` call is gated. |
+| `@intyga/mcp-proxy` | A stdio proxy that enforces policy in front of an MCP server, no code changes. |
 
 ---
 
 ## Two ways to integrate
 
 **1. Connect to the hosted approval endpoint (lowest friction, nothing to install).**
-Point your agent at the SÄKRA gateway's MCP endpoint over SSE with a Bearer agent token — add it to
+Point your agent at the Intyga gateway's MCP endpoint over SSE with a Bearer agent token — add it to
 your client's `mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "sakra": {
+    "intyga": {
       "type": "sse",
-      "url": "https://api.sakra.com/mcp/sse",
+      "url": "https://api.intyga.com/mcp/sse",
       "headers": { "Authorization": "Bearer <your_agent_token>" }
     }
   }
@@ -49,31 +49,31 @@ The endpoint provides two tools:
 The agent requests sign-off, polls until it resolves, then executes its own action.
 
 **2. Wrap your existing MCP server (transparent gating).**
-Use `@sakra-trust/mcp-sdk` to gate the tools you already expose, without teaching the agent to call an
+Use `@intyga/mcp-sdk` to gate the tools you already expose, without teaching the agent to call an
 approval tool explicitly:
 
 ```bash
-npm install @sakra-trust/mcp-sdk
+npm install @intyga/mcp-sdk
 ```
 
 ```typescript
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { sakrafyServer } from "@sakra-trust/mcp-sdk";
+import { intygafyServer } from "@intyga/mcp-sdk";
 import { z } from "zod";
 
 const server = new McpServer({ name: "my-secured-server", version: "1.0.0" });
 
 // Apply the middleware BEFORE registering tools so every server.tool call is captured.
 // Credentials come from the environment — never hardcode a client secret.
-sakrafyServer(server, {
-  gatewayUrl: process.env.SAKRA_GATEWAY_URL!,
-  clientId: process.env.SAKRA_CLIENT_ID!,
-  clientSecret: process.env.SAKRA_CLIENT_SECRET!,
-  agentId: process.env.SAKRA_AGENT_ID!,
+intygafyServer(server, {
+  gatewayUrl: process.env.INTYGA_GATEWAY_URL!,
+  clientId: process.env.INTYGA_CLIENT_ID!,
+  clientSecret: process.env.INTYGA_CLIENT_SECRET!,
+  agentId: process.env.INTYGA_AGENT_ID!,
   enforcement: "local-first",
 });
 
-// Registered after sakrafyServer — now gated automatically.
+// Registered after intygafyServer — now gated automatically.
 server.tool("wire_transfer", "Transfer funds", { amount: z.number() }, async ({ amount }) => {
   /* only runs once a human has signed off */
 });

@@ -1,5 +1,5 @@
 {
-  "extends": "@sakra-trust/config/tsconfig.base.json",
+  "extends": "@intyga/config/tsconfig.base.json",
   "compilerOptions": {
     "rootDir": "src",
     "outDir": "dist",

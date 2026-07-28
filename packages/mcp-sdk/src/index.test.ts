@@ -1,10 +1,10 @@
-// sakrafyServer() monkey-patches server.tool so every registered handler goes through the approval
+// intygafyServer() monkey-patches server.tool so every registered handler goes through the approval
 // gate. These tests cover the wrapping contract (does the original still get registered correctly?)
 // and the enforcement contract (can a call reach the real handler without clearance?).
 
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { sakrafyServer } from "./index.ts"
+import { intygafyServer } from "./index.ts"
 
 type ToolFn = (...args: unknown[]) => unknown
 
@@ -34,7 +34,7 @@ function wrapHandler(
   extraArgs: unknown[] = [],
 ) {
   const { server, registered } = fakeServer()
-  sakrafyServer(server as never, { ...CONFIG, ...config } as never)
+  intygafyServer(server as never, { ...CONFIG, ...config } as never)
   server.tool("transfer", ...extraArgs, handler)
   const args = registered[0]!
   return { args, secured: args[args.length - 1] as ToolFn }
@@ -58,7 +58,7 @@ test("the registered handler is the wrapper, not the original", () => {
 
 test("a registration with no handler is passed straight through untouched", () => {
   const { server, registered } = fakeServer()
-  sakrafyServer(server as never, CONFIG as never)
+  intygafyServer(server as never, CONFIG as never)
   const result = server.tool("transfer", { schema: true })
   assert.equal(result, "registered")
   assert.deepEqual(registered[0], ["transfer", { schema: true }])
@@ -111,7 +111,7 @@ test("a denied action never reaches the original handler", async () => {
   )
   const result = (await secured({}, {})) as { content: { text: string }[] }
   assert.equal(ran, false, "denied action executed anyway")
-  assert.match(result.content[0]!.text, /denied by SÄKRA policy/)
+  assert.match(result.content[0]!.text, /denied by Intyga policy/)
 })
 
 test("a gateway that cannot be reached fails closed, without executing", async () => {
@@ -129,7 +129,7 @@ test("a gateway that cannot be reached fails closed, without executing", async (
     // must be reported as failed, never optimistically executed.
     const result = (await secured({}, {})) as { content: { text: string }[] }
     assert.equal(ran, false, "handler ran despite the gateway being unreachable")
-    assert.match(result.content[0]!.text, /SÄKRA Gateway Error: connection refused/)
+    assert.match(result.content[0]!.text, /Intyga Gateway Error: connection refused/)
   } finally {
     globalThis.fetch = originalFetch
   }

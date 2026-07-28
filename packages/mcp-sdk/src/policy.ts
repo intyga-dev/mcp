@@ -1,5 +1,5 @@
-// The local-first policy gate, shared by the in-process wrapper (`sakrafyServer`) and the stdio proxy
-// (@sakra-trust/mcp-proxy). It used to be copy-pasted into both; a security decision that exists twice
+// The local-first policy gate, shared by the in-process wrapper (`intygafyServer`) and the stdio proxy
+// (@intyga/mcp-proxy). It used to be copy-pasted into both; a security decision that exists twice
 // drifts, so it lives here once and is the only thing either caller consults.
 //
 // Fail-closed is the whole contract: every path that is not an explicit, matched `allow` must end at

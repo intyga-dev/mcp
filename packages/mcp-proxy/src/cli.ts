@@ -3,14 +3,14 @@
 import { spawn } from "node:child_process"
 import fs from "node:fs"
 import readline from "node:readline"
-import { evaluatePolicy, requestApproval } from "@sakra-trust/mcp-sdk"
+import { evaluatePolicy, requestApproval } from "@intyga/mcp-sdk"
 
 // Simple CLI arguments parser
 const args = process.argv.slice(2)
-const gatewayUrl = getArg("--gateway-url") || process.env.SAKRA_GATEWAY_URL || "http://localhost:8787"
-const clientId = getArg("--client-id") || process.env.SAKRA_CLIENT_ID || ""
-const clientSecret = getArg("--client-secret") || process.env.SAKRA_CLIENT_SECRET || ""
-const _agentId = getArg("--agent-id") || process.env.SAKRA_AGENT_ID || ""
+const gatewayUrl = getArg("--gateway-url") || process.env.INTYGA_GATEWAY_URL || "http://localhost:8787"
+const clientId = getArg("--client-id") || process.env.INTYGA_CLIENT_ID || ""
+const clientSecret = getArg("--client-secret") || process.env.INTYGA_CLIENT_SECRET || ""
+const _agentId = getArg("--agent-id") || process.env.INTYGA_AGENT_ID || ""
 const enforcement = getArg("--enforcement") || "local-first"
 const localPolicyPath = getArg("--local-policy") || ""
 const targetCommand = getArg("--target-command") || ""
@@ -95,7 +95,7 @@ rl.on("line", (line) => {
   messageQueue = messageQueue
     .then(() => processMessage(line))
     .catch((err) => {
-      console.error("[SÄKRA Proxy] Error processing message:", err)
+      console.error("[Intyga Proxy] Error processing message:", err)
     })
 })
 
@@ -132,7 +132,7 @@ async function processMessage(line: string) {
           id,
           error: {
             code: -32603,
-            message: `Security Violation: Action '${name}' is denied by SÄKRA policy.`,
+            message: `Security Violation: Action '${name}' is denied by Intyga policy.`,
           },
         }
         process.stdout.write(`${JSON.stringify(response)}\n`)
@@ -169,7 +169,7 @@ async function processMessage(line: string) {
           id,
           error: {
             code: -32603,
-            message: `SÄKRA Gateway Error: ${outcome.reason}`,
+            message: `Intyga Gateway Error: ${outcome.reason}`,
           },
         }
         process.stdout.write(`${JSON.stringify(response)}\n`)

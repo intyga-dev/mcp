@@ -1,13 +1,9 @@
 {
+  "extends": "@intyga/config/tsconfig.base.json",
   "compilerOptions": {
     "target": "ESNext",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "declaration": true,
     "outDir": "./dist",
     "rootDir": "./src",
-    "strict": true,
-    "esModuleInterop": true,
     "types": ["node"]
   },
   "include": ["src/**/*"],

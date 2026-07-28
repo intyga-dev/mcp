@@ -1,11 +1,11 @@
 {
-  "name": "@sakra-trust/mcp-proxy",
+  "name": "@intyga/mcp-proxy",
   "version": "1.0.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
-    "sakra-proxy": "./src/cli.ts"
+    "intyga-proxy": "./src/cli.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -13,11 +13,11 @@
     "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-lines=97 --test-coverage-branches=97 --test-coverage-functions=97 'src/**/*.test.ts'"
   },
   "devDependencies": {
-    "@sakra-trust/config": "workspace:*",
+    "@intyga/config": "workspace:*",
     "@types/node": "^26.1.1",
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@sakra-trust/mcp-sdk": "workspace:*"
+    "@intyga/mcp-sdk": "workspace:*"
   }
 }

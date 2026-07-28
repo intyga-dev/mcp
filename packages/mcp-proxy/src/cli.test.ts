@@ -12,7 +12,7 @@ import { test } from "node:test"
 import { fileURLToPath } from "node:url"
 
 const CLI = fileURLToPath(new URL("./cli.ts", import.meta.url))
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "sakra-proxy-test-"))
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "intyga-proxy-test-"))
 
 function policyFile(rules: unknown): string {
   const file = path.join(tmp, `policy-${Math.random().toString(36).slice(2)}.json`)

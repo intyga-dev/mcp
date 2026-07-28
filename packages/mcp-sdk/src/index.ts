@@ -7,7 +7,7 @@ export type { ApprovalOutcome, ApprovalRequest } from "./approval-client.js"
 export { evaluatePolicy } from "./policy.js"
 export type { PolicyContext, PolicyDecision, PolicyManifest, PolicyRule } from "./policy.js"
 
-export interface SakraConfig {
+export interface IntygaConfig {
   gatewayUrl: string
   clientId: string
   clientSecret: string
@@ -16,7 +16,7 @@ export interface SakraConfig {
   localPolicyJson?: string
 }
 
-export function sakrafyServer(server: McpServer, config: SakraConfig) {
+export function intygafyServer(server: McpServer, config: IntygaConfig) {
   const originalTool = server.tool.bind(server)
 
   server.tool = ((...args: Parameters<typeof originalTool>) => {
@@ -43,13 +43,13 @@ export function sakrafyServer(server: McpServer, config: SakraConfig) {
           content: [
             {
               type: "text",
-              text: `Security Violation: Action '${name}' is denied by SÄKRA policy.`,
+              text: `Security Violation: Action '${name}' is denied by Intyga policy.`,
             },
           ],
         }
       }
 
-      // Otherwise, request human approval (biometric step-up) via SÄKRA Gateway API
+      // Otherwise, request human approval (biometric step-up) via Intyga Gateway API
       const outcome = await requestApproval({
         gatewayUrl: config.gatewayUrl,
         clientId: config.clientId,
@@ -75,7 +75,7 @@ export function sakrafyServer(server: McpServer, config: SakraConfig) {
           content: [
             {
               type: "text",
-              text: `SÄKRA Gateway Error: ${outcome.reason}`,
+              text: `Intyga Gateway Error: ${outcome.reason}`,
             },
           ],
         }
