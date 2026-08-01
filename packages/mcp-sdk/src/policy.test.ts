@@ -120,3 +120,68 @@ test("a numeric string amount is still compared against the ceiling", () => {
 test("Infinity is treated as exceeding any ceiling", () => {
   assert.equal(evaluatePolicy("transfer", { amount: Number.POSITIVE_INFINITY }, CEILING), "require_approval")
 })
+
+// ─── Malformed manifests must return, not throw ──────────────────────────────
+//
+// These three shapes are valid JSON, so they got past the `JSON.parse` try/catch, and were then cast
+// straight to `PolicyManifest`. Each one threw out of `evaluatePolicy` instead of returning a
+// verdict. A thrown error is not a decision: @intyga/mcp-proxy caught it and forwarded the tool call
+// to the target server ungated, so one typo in an operator's policy file silently disabled the gate.
+
+test("a rules value that is not an array escalates instead of throwing", () => {
+  for (const rules of [{ a: 1 }, 5, "rules", true]) {
+    const ctx = { enforcement: "local-first" as const, localPolicyJson: JSON.stringify({ rules }) }
+    assert.equal(
+      evaluatePolicy("transfer", {}, ctx),
+      "require_approval",
+      `rules=${JSON.stringify(rules)} should escalate`,
+    )
+  }
+})
+
+test("a null or non-object entry in the rules array escalates instead of throwing", () => {
+  for (const rule of [null, 5, "transfer", []]) {
+    const ctx = local([rule])
+    assert.equal(
+      evaluatePolicy("transfer", {}, ctx),
+      "require_approval",
+      `rule=${JSON.stringify(rule)} should escalate`,
+    )
+  }
+})
+
+test("one malformed rule fails the whole document rather than being skipped", () => {
+  // A policy the operator cannot have meant is not a policy to partially honour.
+  const ctx = local([{ action: "transfer", effect: "allow" }, null])
+  assert.equal(evaluatePolicy("transfer", {}, ctx), "require_approval")
+})
+
+// ─── The ceiling itself must be a number ─────────────────────────────────────
+//
+// `toAmount` hardened the argument side; the rule side was still trusted straight from JSON.
+// `amount > "abc"` is a NaN comparison — false — so the guard body was skipped and `effect` was
+// returned unconditionally. A mistyped ceiling became an unbounded auto-approve.
+
+test("a non-numeric ceiling escalates rather than deleting the ceiling", () => {
+  for (const maxAmount of ["abc", "100", {}, [], null, true, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const ctx = local([{ action: "transfer", maxAmount, effect: "allow" }])
+    assert.equal(
+      evaluatePolicy("transfer", { amount: 999_999 }, ctx),
+      "require_approval",
+      `maxAmount=${JSON.stringify(maxAmount) ?? "undefined"} should escalate`,
+    )
+  }
+})
+
+// ─── The effect must be one of the three decisions ───────────────────────────
+
+test("an unrecognized effect escalates instead of being returned verbatim", () => {
+  for (const effect of ["ALLOW", "permit", "Allow", 1, true, null]) {
+    const ctx = local([{ action: "transfer", effect }])
+    assert.equal(
+      evaluatePolicy("transfer", {}, ctx),
+      "require_approval",
+      `effect=${JSON.stringify(effect)} should escalate`,
+    )
+  }
+})

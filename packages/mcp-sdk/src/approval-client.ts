@@ -11,6 +11,16 @@ export interface ApprovalRequest {
   gatewayUrl: string
   clientId: string
   clientSecret: string
+  /**
+   * The relying party / execution environment this approval is bound to (DIV §3 Invariant 5, Target
+   * Isolation). REQUIRED, and asserted from the agent's own identity.
+   *
+   * Omitting it is not neutral: the gateway defaults a missing target to the literal `"global"`, so
+   * the signed intent binds no environment at all and an approval raised here verifies at every
+   * other relying party in the tenant. That is precisely the cross-service replay Target Isolation
+   * exists to prevent.
+   */
+  target: string
   actionType: string
   params: Record<string, unknown>
   actionDescription?: string
@@ -44,11 +54,26 @@ async function getToken(req: ApprovalRequest): Promise<string> {
   return ((await res.json()) as { access_token: string }).access_token
 }
 
+/**
+ * Raise the challenge on the AGENT-facing route.
+ *
+ * `/action/request`, `/action/status/:nonce` and `/action/consume` are the CONSOLE step-up endpoints.
+ * They are gated on `internalOk(req)`, a constant-time comparison against `env.metricsToken` — not on
+ * `verifyAgentToken` — so an OAuth agent token 401s on every one of them and this whole round trip
+ * could never complete. (It failed closed, so nothing was authorized without a human; the gate simply
+ * did not work.) The bodies were wrong too: `actionRequest` requires `actorDid` and `summary`, and
+ * `actionConsume` requires `actorDid` and a UUID `tenantId`.
+ *
+ * The fix is to use the routes built for this caller, not to hand an agent `metricsToken` — that
+ * token also unlocks `/internal/metrics`, `/metrics/usage/:tenantId`, and every console step-up
+ * request/status/consume for the whole deployment.
+ */
 async function openChallenge(req: ApprovalRequest, token: string): Promise<string> {
-  const res = await fetch(`${req.gatewayUrl}/action/request`, {
+  const res = await fetch(`${req.gatewayUrl}/authorize`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
+      target: req.target,
       actionType: req.actionType,
       params: req.params,
       actionDescription:
@@ -81,7 +106,7 @@ async function waitForVerdict(req: ApprovalRequest, token: string, nonce: string
   while (Date.now() < deadline) {
     await sleep(intervalMs)
     try {
-      const res = await fetch(`${req.gatewayUrl}/action/status/${encodeURIComponent(nonce)}`, {
+      const res = await fetch(`${req.gatewayUrl}/authorize/${encodeURIComponent(nonce)}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       if (!res.ok) throw new Error(`status check failed (${res.status})`)
@@ -105,12 +130,20 @@ async function waitForVerdict(req: ApprovalRequest, token: string, nonce: string
  * claim may already have been spent.
  */
 async function consume(req: ApprovalRequest, token: string, nonce: string): Promise<void> {
-  const res = await fetch(`${req.gatewayUrl}/action/consume`, {
+  const res = await fetch(`${req.gatewayUrl}/authorize/verify`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ nonce, actionType: req.actionType, params: req.params }),
+    // `target` is REQUIRED by the authorizationConsume schema — omitting it is a 400, which would
+    // make redemption unreachable and leave the approval replayable for the rest of its TTL.
+    body: JSON.stringify({ nonce, target: req.target, actionType: req.actionType, params: req.params }),
   })
   if (!res.ok) throw new Error("Failed to consume approved signature challenge")
+  // A 200 is not automatically a redemption: the gateway reports a params/target mismatch or an
+  // already-spent nonce in the body. Executing on that would defeat the re-binding this call is for.
+  const body = (await res.json().catch(() => ({}))) as { ok?: boolean; reason?: string }
+  if (body.ok !== true) {
+    throw new Error(`Approval could not be consumed: ${body.reason ?? "gateway refused the redemption"}`)
+  }
 }
 
 /** Run the full approval round trip. Never throws — every failure is reported as a refusal. */

@@ -6,6 +6,8 @@
 // `require_approval` so a human is asked. Unknown action, absent policy, unparseable policy, wrong
 // enforcement mode — all of them escalate rather than execute.
 
+import { z } from "zod"
+
 export type PolicyDecision = "allow" | "deny" | "require_approval"
 
 export interface PolicyRule {
@@ -22,6 +24,34 @@ export interface PolicyContext {
   enforcement?: "local-first" | "gateway-enforced"
   localPolicyJson?: string
 }
+
+// The policy document is an untrusted boundary — an operator's hand-written file, or something a
+// deployment tool generated. Parsing it by cast (`as PolicyManifest`) is what let three
+// parseable-but-wrong shapes throw out of this function instead of escalating: `{"rules":{}}` and
+// `{"rules":5}` both died on `.find`, and `{"rules":[null]}` died reading `.action` off null.
+//
+// One malformed rule fails the whole document rather than being skipped. That is deliberate: a
+// policy the operator cannot have meant is not a policy to partially honour, and escalating every
+// action to a human is the safe reading of "I don't understand this file".
+const policyDecisionSchema = z.enum(["allow", "deny", "require_approval"])
+
+const policyRuleSchema = z.object({
+  action: z.string(),
+  // A ceiling that isn't a finite number is not a ceiling. `maxAmount: "abc"` used to make
+  // `amount > rule.maxAmount` a NaN comparison — false — which skipped the guard and returned
+  // `allow`, turning a typo into an unbounded auto-approve.
+  maxAmount: z
+    .number()
+    .refine((n) => Number.isFinite(n))
+    .optional(),
+  // Anything outside the three literals (`"ALLOW"`, `"permit"`, a number) is not a decision we can
+  // act on. Previously it was returned verbatim, typed as `PolicyDecision` but not being one.
+  effect: policyDecisionSchema.optional(),
+})
+
+const policyManifestSchema = z.object({
+  rules: z.array(policyRuleSchema).optional(),
+})
 
 /**
  * Read a spend amount, or `undefined` if the value isn't one. Deliberately stricter than `Number()`:
@@ -47,15 +77,36 @@ export function evaluatePolicy(
   handlerArgs: Record<string, unknown>,
   ctx: PolicyContext,
 ): PolicyDecision {
+  // Total by construction. Callers treat a thrown error very differently from a returned verdict —
+  // @intyga/mcp-proxy used to forward the tool call to the child on any throw — so the contract is
+  // that this function returns a decision for every input, including ones a future edit gets wrong.
+  try {
+    return decide(actionName, handlerArgs, ctx)
+  } catch {
+    return "require_approval"
+  }
+}
+
+function decide(
+  actionName: string,
+  handlerArgs: Record<string, unknown>,
+  ctx: PolicyContext,
+): PolicyDecision {
   if (ctx.enforcement !== "local-first" || !ctx.localPolicyJson) return "require_approval"
 
-  let rules: PolicyRule[]
+  let document: unknown
   try {
-    rules = (JSON.parse(ctx.localPolicyJson) as PolicyManifest).rules ?? []
+    document = JSON.parse(ctx.localPolicyJson)
   } catch {
     // An unreadable policy is not permission to act.
     return "require_approval"
   }
+
+  const manifest = policyManifestSchema.safeParse(document)
+  // Parseable JSON in a shape we don't recognise is no better than unparseable JSON.
+  if (!manifest.success) return "require_approval"
+
+  const rules = manifest.data.rules ?? []
 
   const rule = rules.find((r) => r.action === actionName)
   if (!rule) return "require_approval" // unknown action: ask a human
@@ -65,7 +116,8 @@ export function evaluatePolicy(
   if (rule.maxAmount !== undefined) {
     // A rule that states a ceiling only means "allow" while the request is *demonstrably* under it.
     // Anything we cannot read as a number fails the check rather than passing it — see toAmount for
-    // why bare `Number()` is not safe here.
+    // why bare `Number()` is not safe here. The ceiling itself is validated at parse time, so this
+    // comparison can no longer be NaN on the right-hand side either.
     const amount = toAmount(handlerArgs.amount)
     if (amount === undefined || amount > rule.maxAmount) {
       return effect === "allow" ? "require_approval" : effect
