@@ -23,7 +23,16 @@ function policyFile(rules: unknown): string {
 const rpc = (method: string, params?: unknown, id = 1) =>
   JSON.stringify({ jsonrpc: "2.0", id, method, params })
 
-const SETTLE_MS = 3_000
+// The budget for `node --import tsx` to boot, compile the CLI and round-trip a line through `cat`.
+// This used to be a flat 3s wait per test: long enough to be 39s of pure sleeping locally, and short
+// enough that a loaded CI runner truncated stdout and the assertion read as "the proxy did not
+// forward the call" — a spawn timeout wearing a logic bug's clothes.
+//
+// So it is a CAP now, not a duration. Output is collected until it goes quiet for QUIET_MS, which is
+// the real signal that the proxy has said everything it is going to say. A fast machine finishes in
+// well under a second per test; a slow one gets up to SETTLE_CAP_MS before being cut off.
+const SETTLE_CAP_MS = Number(process.env.MCP_PROXY_SETTLE_MS ?? 15_000)
+const QUIET_MS = 300
 
 /**
  * Run the proxy with `cat` as the target, send `lines`, let it settle, then stop it and return
@@ -47,18 +56,29 @@ function runProxy(lines: string[], opts: { policy?: string; enforcement?: string
       stdio: ["pipe", "pipe", "inherit"],
     })
     let out = ""
+    let lastData = Date.now()
     child.stdout.on("data", (d: Buffer) => {
       out += d.toString()
+      lastData = Date.now()
     })
     child.on("error", reject)
 
     for (const line of lines) child.stdin.write(`${line}\n`)
-    setTimeout(() => {
+
+    const started = Date.now()
+    const finish = () => {
+      clearInterval(poll)
       child.kill("SIGKILL")
       child.stdout.destroy()
       child.stdin.destroy()
       resolve(out)
-    }, SETTLE_MS)
+    }
+    const poll = setInterval(() => {
+      // Quiet only counts once something has arrived — otherwise a slow boot looks like silence and
+      // every test would resolve empty in QUIET_MS.
+      if (out.length > 0 && Date.now() - lastData >= QUIET_MS) return finish()
+      if (Date.now() - started >= SETTLE_CAP_MS) return finish()
+    }, 50)
   })
 }
 

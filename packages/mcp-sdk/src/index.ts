@@ -21,6 +21,12 @@ export interface IntygaConfig {
   target?: string
   enforcement?: "local-first" | "gateway-enforced"
   localPolicyJson?: string
+  /**
+   * Approval-poll overrides, forwarded to `requestApproval`. Leave unset in production: the
+   * defaults (120s window, 2s poll) are sized for a human reaching for a device, not for tests.
+   */
+  timeoutMs?: number
+  intervalMs?: number
 }
 
 type ToolHandler = (handlerArgs: Record<string, unknown>, extra: unknown) => Promise<unknown>
@@ -71,6 +77,8 @@ export function intygafyServer(server: McpServer, config: IntygaConfig) {
         actionType: name,
         params: handlerArgs,
         actionDescription: `Authorize action '${name}' with parameters: ${JSON.stringify(handlerArgs)}`,
+        timeoutMs: config.timeoutMs,
+        intervalMs: config.intervalMs,
       })
 
       if (outcome.outcome === "approved") {
@@ -80,7 +88,7 @@ export function intygafyServer(server: McpServer, config: IntygaConfig) {
           content: [
             {
               type: "text",
-              text: `Security Violation: ${outcome.reason}`,
+              text: `Intyga Gateway Security Check Refused: ${outcome.reason}`,
             },
           ],
         }
