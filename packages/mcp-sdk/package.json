@@ -19,7 +19,7 @@
     "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-lines=97 --test-coverage-branches=94 --test-coverage-functions=91 'src/**/*.test.ts'"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
