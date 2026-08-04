@@ -1,9 +1,36 @@
 {
   "name": "@intyga/mcp-sdk",
   "version": "1.0.0",
-  "private": true,
+  "description": "Wrap an MCP server so every tool call is gated behind a cryptographically-signed human approval (local policy + Intyga gateway step-up).",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/intyga-dev/mcp.git",
+    "directory": "packages/mcp-sdk"
+  },
+  "homepage": "https://www.intyga.com",
+  "bugs": "https://github.com/intyga-dev/mcp/issues",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "authorization",
+    "human-approval",
+    "webauthn"
+  ],
   "type": "module",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

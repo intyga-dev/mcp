@@ -1,9 +1,36 @@
 {
   "name": "@intyga/mcp-proxy",
   "version": "1.0.0",
-  "private": true,
+  "description": "Stdio proxy that gates a third-party MCP server's tool calls behind a signed human approval — no code changes to the wrapped server.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/intyga-dev/mcp.git",
+    "directory": "packages/mcp-proxy"
+  },
+  "homepage": "https://www.intyga.com",
+  "bugs": "https://github.com/intyga-dev/mcp/issues",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "authorization",
+    "human-approval",
+    "proxy"
+  ],
   "type": "module",
+  "files": [
+    "src/cli.ts",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24"
+  },
   "bin": {
     "intyga-proxy": "./src/cli.ts"
   },
