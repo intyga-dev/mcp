@@ -21,23 +21,27 @@ type StatusStep = { status: string } | { fail: true } | { httpStatus: number }
 
 /**
  * Stub the whole round trip. Token and challenge always succeed; `steps` drives one status check
- * each, so a test can spell out exactly what sequence of gateway behaviour it wants.
+ * each, so a test can spell out exactly what sequence of gateway behaviour it wants. Each exchange
+ * mints a distinct token (`tok-1`, `tok-2`, …) so a test can tell which one a later call carried.
  */
 function stubGateway(steps: StatusStep[], opts: { consumeOk?: boolean } = {}) {
   const original = globalThis.fetch
   let statusCalls = 0
+  let exchanges = 0
+  let consumeBearer: string | undefined
   const json = (body: unknown, ok = true, status = 200) =>
     ({ ok, status, json: async () => body }) as unknown as Response
 
-  globalThis.fetch = (async (url: unknown) => {
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
     const u = String(url)
     // These are the AGENT-facing routes. The client used to call the console step-up endpoints
     // (/action/request, /action/status, /action/consume), which are gated on env.metricsToken and
     // 401 for an agent token — so the whole round trip could never complete. A stub that answers
     // whatever the client happens to ask for cannot catch that, which is why these match the real
     // paths exactly.
-    if (u.endsWith("/oauth/token")) return json({ access_token: "tok" })
+    if (u.endsWith("/oauth/token")) return json({ access_token: `tok-${++exchanges}` })
     if (u.endsWith("/authorize/verify")) {
+      consumeBearer = (init?.headers as Record<string, string> | undefined)?.Authorization
       const ok = opts.consumeOk ?? true
       return json({ ok, reason: ok ? undefined : "already consumed" }, ok, ok ? 200 : 409)
     }
@@ -56,6 +60,8 @@ function stubGateway(steps: StatusStep[], opts: { consumeOk?: boolean } = {}) {
       globalThis.fetch = original
     },
     statusCalls: () => statusCalls,
+    exchanges: () => exchanges,
+    consumeBearer: () => consumeBearer,
   }
 }
 
@@ -108,6 +114,36 @@ test("the failure counter resets after any successful check", async (t) => {
 
   const r = await requestApproval(BASE)
   assert.equal(r.outcome, "approved")
+})
+
+// ─── A 401 mid-wait is an expired token, not a blip ──────────────────────────
+//
+// The token is exchanged once per round trip and then used for the whole wait, and `timeoutMs` can
+// exceed the token's TTL. Counting the resulting 401s as poll errors would abort a wait the human
+// was about to finish, and would do it with a message blaming the gateway's availability.
+test("a 401 mid-wait re-authenticates once and the redemption carries the new token", async (t) => {
+  const gw = stubGateway([{ httpStatus: 401 }, { status: "APPROVED" }])
+  t.after(gw.restore)
+
+  const r = await requestApproval(BASE)
+  assert.equal(r.outcome, "approved")
+  assert.equal(gw.exchanges(), 2, "exactly one re-exchange")
+  assert.equal(gw.statusCalls(), 2, "the 401 is not a poll error and does not count toward the cutoff")
+  // The token that was valid at the end of the wait is the one that must burn the approval.
+  assert.equal(gw.consumeBearer(), "Bearer tok-2")
+})
+
+test("a second 401 after re-authenticating is an ordinary failure, not another exchange", async (t) => {
+  // A revoked key answers 401 forever; one re-exchange is the allowance, then it counts like any
+  // other failed check, so the wait ends at the cutoff instead of looping on the token endpoint.
+  const gw = stubGateway([{ httpStatus: 401 }])
+  t.after(gw.restore)
+
+  const r = await requestApproval(BASE)
+  assert.equal(r.outcome, "error")
+  assert.match(r.outcome === "error" ? r.reason : "", /5 consecutive failures.*status check failed \(401\)/)
+  assert.equal(gw.exchanges(), 2)
+  assert.equal(gw.statusCalls(), 6, "one re-authenticated 401 plus the five that reach the cutoff")
 })
 
 test("a denial is surfaced as a refusal carrying its status", async (t) => {
@@ -187,6 +223,69 @@ test("the round trip uses the agent-facing routes and binds the target on both c
     assert.equal(authorize.body?.target, "prod-payments")
     assert.equal(verify.body?.target, "prod-payments")
     assert.equal(verify.body?.nonce, "n-1")
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test("a refused challenge surfaces the gateway's envelope, not [object Object]", async () => {
+  // The gateway rewrites every non-2xx body into `{ error: { code, message, requestId } }`. Read as
+  // `{ error?: string }` that reached the agent as the literal "[object Object]" and dropped the
+  // requestId, which is the only way to find the matching gateway-side log line.
+  const original = globalThis.fetch
+  globalThis.fetch = (async (url: unknown) => {
+    const u = String(url)
+    if (u.endsWith("/oauth/token"))
+      return { ok: true, status: 200, json: async () => ({ access_token: "tok" }) } as unknown as Response
+    if (u.endsWith("/authorize"))
+      return {
+        ok: false,
+        status: 402,
+        json: async () => ({
+          error: {
+            code: "PAYMENT_REQUIRED",
+            message: "Your plan does not permit this operation.",
+            requestId: "req-abc",
+          },
+        }),
+      } as unknown as Response
+    throw new Error(`unexpected route: ${u}`)
+  }) as typeof fetch
+
+  try {
+    const r = await requestApproval(BASE)
+    assert.equal(r.outcome, "error")
+    const reason = r.outcome === "error" ? r.reason : ""
+    assert.equal(reason.includes("[object Object]"), false)
+    assert.match(reason, /PAYMENT_REQUIRED/)
+    assert.match(reason, /Your plan does not permit this operation\./)
+    assert.match(reason, /req-abc/)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+test("an unrecognised error body falls back to the authored message", async () => {
+  const original = globalThis.fetch
+  globalThis.fetch = (async (url: unknown) => {
+    const u = String(url)
+    if (u.endsWith("/oauth/token"))
+      return { ok: true, status: 200, json: async () => ({ access_token: "tok" }) } as unknown as Response
+    if (u.endsWith("/authorize"))
+      return {
+        ok: false,
+        status: 502,
+        json: async () => {
+          throw new Error("not JSON")
+        },
+      } as unknown as Response
+    throw new Error(`unexpected route: ${u}`)
+  }) as typeof fetch
+
+  try {
+    const r = await requestApproval(BASE)
+    assert.equal(r.outcome, "error")
+    assert.match(r.outcome === "error" ? r.reason : "", /Failed to request approval challenge \(status 502\)/)
   } finally {
     globalThis.fetch = original
   }

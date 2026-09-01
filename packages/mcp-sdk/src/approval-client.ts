@@ -1,3 +1,5 @@
+import { z } from "zod"
+
 // The out-of-band approval round trip: authenticate, raise a challenge, wait for the human, then
 // consume it exactly once before the action runs. Both enforcement paths — the in-process wrapper
 // (`intygafyServer`) and the stdio proxy — share this, because when it existed twice the two copies
@@ -6,6 +8,23 @@
 // Fail-closed throughout: this returns "approved" only when a human actually signed AND the
 // challenge was successfully consumed. Every other outcome — denial, timeout, transport failure,
 // a replayed nonce — is a refusal, and the caller must not execute.
+
+/**
+ * The gateway rewrites EVERY non-2xx JSON body into one envelope at its response boundary
+ * (`apps/gateway/src/public-error.ts`, documented in `docs/API.md`), so `error` is an object, not a
+ * string. Read as `{ error?: string }` it stringified to the literal `[object Object]` and threw
+ * away `requestId` — the only handle correlating a refusal with the gateway-side log.
+ *
+ * Mirrored here rather than imported from `@intyga/mcp-schemas`: this package publishes standalone
+ * and must not carry a workspace dependency. If `PublicApiError` changes shape, grep for it.
+ */
+const publicApiError = z.object({
+  error: z.object({
+    code: z.string(),
+    message: z.string(),
+    requestId: z.string().optional(),
+  }),
+})
 
 export interface ApprovalRequest {
   gatewayUrl: string
@@ -82,8 +101,13 @@ async function openChallenge(req: ApprovalRequest, token: string): Promise<strin
     }),
   })
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string }
-    throw new Error(body.error ?? `Failed to request approval challenge (status ${res.status})`)
+    const parsed = publicApiError.safeParse(await res.json().catch(() => null))
+    if (!parsed.success) throw new Error(`Failed to request approval challenge (status ${res.status})`)
+    const { code, message, requestId } = parsed.data.error
+    throw new Error(
+      `Failed to request approval challenge (status ${res.status}, ${code}): ${message}` +
+        (requestId ? ` [requestId ${requestId}]` : ""),
+    )
   }
   return ((await res.json()) as { nonce: string }).nonce
 }
@@ -96,12 +120,24 @@ async function openChallenge(req: ApprovalRequest, token: string): Promise<strin
  * We tolerate blips and give up only once the gateway looks genuinely unreachable, which is also
  * why a persistently failing gateway now reports that instead of quietly counting down to "timed
  * out" and blaming the human.
+ *
+ * A 401 mid-wait is a different thing from a blip: the agent token has outlived its TTL (a
+ * `timeoutMs` longer than the token's life does this). It is answered by re-exchanging the client
+ * credentials ONCE and carrying on — the returned token is the one still valid at the end, which
+ * `consume` must use. A second 401 after that is an ordinary failure, so a revoked key cannot turn
+ * the wait into an exchange loop.
  */
-async function waitForVerdict(req: ApprovalRequest, token: string, nonce: string): Promise<string> {
+async function waitForVerdict(
+  req: ApprovalRequest,
+  initialToken: string,
+  nonce: string,
+): Promise<{ status: string; token: string }> {
   const timeoutMs = req.timeoutMs ?? 120_000
   const intervalMs = req.intervalMs ?? 2_000
   const deadline = Date.now() + timeoutMs
   let consecutiveErrors = 0
+  let token = initialToken
+  let reauthenticated = false
 
   while (Date.now() < deadline) {
     await sleep(intervalMs)
@@ -109,10 +145,15 @@ async function waitForVerdict(req: ApprovalRequest, token: string, nonce: string
       const res = await fetch(`${req.gatewayUrl}/authorize/${encodeURIComponent(nonce)}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
+      if (res.status === 401 && !reauthenticated) {
+        reauthenticated = true
+        token = await getToken(req)
+        continue
+      }
       if (!res.ok) throw new Error(`status check failed (${res.status})`)
       const { status } = (await res.json()) as { status: string }
       consecutiveErrors = 0
-      if (status !== "PENDING") return status
+      if (status !== "PENDING") return { status, token }
     } catch (err) {
       if (++consecutiveErrors >= MAX_POLL_ERRORS) {
         throw new Error(
@@ -121,7 +162,7 @@ async function waitForVerdict(req: ApprovalRequest, token: string, nonce: string
       }
     }
   }
-  return "TIMED_OUT"
+  return { status: "TIMED_OUT", token }
 }
 
 /**
@@ -149,9 +190,9 @@ async function consume(req: ApprovalRequest, token: string, nonce: string): Prom
 /** Run the full approval round trip. Never throws — every failure is reported as a refusal. */
 export async function requestApproval(req: ApprovalRequest): Promise<ApprovalOutcome> {
   try {
-    const token = await getToken(req)
-    const nonce = await openChallenge(req, token)
-    const status = await waitForVerdict(req, token, nonce)
+    const initialToken = await getToken(req)
+    const nonce = await openChallenge(req, initialToken)
+    const { status, token } = await waitForVerdict(req, initialToken, nonce)
 
     if (status !== "APPROVED") {
       return {

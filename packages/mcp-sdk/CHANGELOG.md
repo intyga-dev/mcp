@@ -5,6 +5,10 @@ All notable changes to `@intyga/mcp-sdk` are documented here. The format follows
 
 ## [Unreleased]
 
+- `requestApproval` re-exchanges the client credentials once when a status check answers 401
+  mid-wait (the agent token outlived its TTL — a `timeoutMs` longer than the token's life does
+  this) and redeems the approval with the new token, instead of counting the 401s as polling
+  failures and aborting the wait. A second 401 after that is an ordinary failure.
 - Package made publishable (`private` removed) with registry metadata and this changelog.
 
 ## [1.0.0]

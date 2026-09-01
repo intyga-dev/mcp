@@ -24,7 +24,7 @@ proxy spawns the real server as a child and mediates the protocol stream.
 | `--gateway-url` | `INTYGA_GATEWAY_URL` | Intyga gateway (default `http://localhost:8787`) |
 | `--client-id` | `INTYGA_CLIENT_ID` | Agent credential id |
 | `--client-secret` | `INTYGA_CLIENT_SECRET` | **Use the env var.** The flag is accepted but warns: argv is world-readable via `ps`, including by the wrapped server — the one process this proxy exists to distrust |
-| `--agent-id` | `INTYGA_AGENT_ID` | The agent identity raising approvals |
+| `--agent-id` | `INTYGA_AGENT_ID` | Default value for `--target` when that is unset. Never sent to the gateway — the identity the ledger records as requester comes from the `--client-id` credential exchange |
 | `--target` | `INTYGA_TARGET` | Relying-party identifier approvals are bound to (DIV Target Isolation). Defaults to the agent id — never to the gateway's `"global"` fallback |
 | `--enforcement` | — | `local-first` (default) or `gateway-enforced` (every call escalates) |
 | `--local-policy` | — | Path to a policy manifest JSON — same format and same evaluator as [`@intyga/mcp-sdk`](../mcp-sdk), so the two enforcement paths cannot disagree |

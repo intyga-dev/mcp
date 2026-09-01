@@ -70,6 +70,17 @@ test("an unset enforcement mode escalates", () => {
   )
 })
 
+test("an unexpected policy evaluation error still fails closed", () => {
+  const ctx = {
+    get enforcement(): "local-first" {
+      throw new Error("untrusted policy context getter failed")
+    },
+    localPolicyJson: policy([{ action: "transfer", effect: "allow" }]),
+  }
+
+  assert.equal(evaluatePolicy("transfer", {}, ctx), "require_approval")
+})
+
 // ─── Spending ceilings ───────────────────────────────────────────────────────
 
 const CEILING = local([{ action: "transfer", maxAmount: 100, effect: "allow" }])

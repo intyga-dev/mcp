@@ -1,6 +1,6 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { requestApproval } from "./approval-client.js"
 import { evaluatePolicy } from "./policy.js"
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 
 export { requestApproval } from "./approval-client.js"
 export type { ApprovalOutcome, ApprovalRequest } from "./approval-client.js"
