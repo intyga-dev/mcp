@@ -4,8 +4,10 @@
 // happened.
 
 import assert from "node:assert/strict"
+import crypto from "node:crypto"
 import { test } from "node:test"
-import { requestApproval } from "./approval-client.ts"
+import { agentConfigDigest, canonicalIntentPayload, type AgentIntentContext } from "@intyga/sdk"
+import { requestApproval, type AgentV1Runtime } from "./approval-client.ts"
 
 const BASE = {
   gatewayUrl: "http://gw.example",
@@ -72,6 +74,131 @@ test("a transient failure mid-wait is ridden out and the approval still lands", 
   // The human is still deciding; one dropped socket must not throw their decision away.
   const r = await requestApproval(BASE)
   assert.equal(r.outcome, "approved")
+})
+
+test("v1 agent approval verifies the receipt and reserves the session before execution", async (t) => {
+  const original = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = original
+  })
+  const keys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" })
+  const publicKey = keys.publicKey.export({ format: "der", type: "spki" }).toString("base64")
+  const nonce = "agent-v1-test-nonce"
+  const nbf = new Date().toISOString()
+  const expiresAt = new Date(Date.now() + 180_000).toISOString()
+  const liveConfig = {
+    model: { provider: "test", version: "model-v1" },
+    tools: [],
+    systemPrompt: "Approve one payment",
+  }
+  const agentContext: AgentIntentContext = {
+    action: { reversibility: "irreversible", amount: { amount: "10.00", currency: "SEK" } },
+    agent: {
+      label: "did:intyga:agent:payments",
+      configDigest: agentConfigDigest(liveConfig),
+      delegatedBy: null,
+    },
+    session: {
+      id: `sha256:${"1".repeat(64)}`,
+      seq: "1",
+      prev: null,
+      aggregate: { amount: "10.00", currency: "SEK" },
+    },
+    nbf,
+  }
+  const payload = canonicalIntentPayload({
+    target: BASE.target,
+    actionType: BASE.actionType,
+    display: "Pay invoice",
+    params: BASE.params,
+    requester: { did: agentContext.agent.label, attestation: null },
+    requirement: {
+      requiredApprovals: 1,
+      requireHardwareKey: false,
+      allowedAaguids: [],
+      requesterCannotApprove: true,
+      signerClass: "human",
+    },
+    nonce,
+    expiresAt,
+    agentContext,
+  })
+  const receipt = {
+    canonicalPayload: payload,
+    actionDescription: "Pay invoice",
+    params: BASE.params,
+    requester: { did: agentContext.agent.label, attestation: null },
+    signerDid: "did:intyga:owner",
+    signerPublicKey: publicKey,
+    signature: crypto
+      .sign("sha256", Buffer.from(payload), {
+        key: keys.privateKey,
+        dsaEncoding: "ieee-p1363",
+      })
+      .toString("base64"),
+    sigAlg: "ES256",
+    verificationCode: "unused",
+  }
+  let seenInput: unknown
+  let reserved = 0
+  let config = liveConfig
+  let driftOnConsume = false
+  let reservationAllowed = true
+  const runtime: AgentV1Runtime = {
+    requesterDid: agentContext.agent.label,
+    approvers: { dids: ["did:intyga:owner"], resolveKey: () => publicKey },
+    verifier: {},
+    prepare: async () => ({
+      action: agentContext.action,
+      delegatedBy: null,
+      session: agentContext.session,
+    }),
+    liveConfig: async () => config,
+    readState: async () => ({ head: null, seq: "0", aggregate: null }),
+    reserve: async ({ next }) => {
+      reserved++
+      return reservationAllowed && next.seq === "1"
+    },
+  }
+  const json = (body: unknown) => ({ ok: true, status: 200, json: async () => body }) as Response
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    const u = String(url)
+    if (u.endsWith("/oauth/token")) return json({ access_token: "token" })
+    if (u.endsWith("/authorize/verify")) {
+      if (driftOnConsume) config = { ...liveConfig, systemPrompt: "Changed after approval" }
+      return json({ ok: true })
+    }
+    if (u.endsWith("/authorize")) {
+      seenInput = JSON.parse(String(init?.body))
+      return json({ nonce, status: "PENDING", agentContext })
+    }
+    if (u.includes("/authorize/")) return json({ status: "APPROVED", receipt })
+    throw new Error("unexpected endpoint")
+  }) as typeof fetch
+
+  const request = { ...BASE, actionDescription: "Pay invoice", agentV1: runtime }
+  assert.equal((await requestApproval(request)).outcome, "approved")
+  assert.equal(reserved, 1)
+  assert.deepEqual((seenInput as { agentContext: unknown }).agentContext, {
+    action: agentContext.action,
+    delegatedBy: null,
+    session: agentContext.session,
+    configDigest: agentContext.agent.configDigest,
+  })
+
+  driftOnConsume = true
+  const drifted = await requestApproval(request)
+  assert.equal(drifted.outcome, "error")
+  assert.match(drifted.outcome === "error" ? drifted.reason : "", /drifted/)
+  assert.equal(reserved, 1)
+
+  driftOnConsume = false
+  config = liveConfig
+  reservationAllowed = false
+  const conflict = await requestApproval(request)
+  assert.equal(conflict.outcome, "error")
+  assert.match(conflict.outcome === "error" ? conflict.reason : "", /reservation refused/)
+  assert.equal(reserved, 2)
 })
 
 test("a 502 counts as a blip, not as a verdict", async (t) => {

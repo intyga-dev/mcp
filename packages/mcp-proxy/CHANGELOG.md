@@ -5,6 +5,8 @@ All notable changes to `@intyga/mcp-proxy` are documented here. The format follo
 
 ## [Unreleased]
 
+- `--agent-v1-module` loads an RP-owned runtime for v1 AI-agent context, receipt verification and
+  atomic nonce/session/budget reservation. Local `allow` never forwards a tool without approval.
 - Package made publishable (`private` removed) with registry metadata and this changelog.
 
 ## [1.0.0]

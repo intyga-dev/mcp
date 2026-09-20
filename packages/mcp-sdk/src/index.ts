@@ -3,7 +3,7 @@ import { evaluatePolicy } from "./policy.js"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 
 export { requestApproval } from "./approval-client.js"
-export type { ApprovalOutcome, ApprovalRequest } from "./approval-client.js"
+export type { AgentV1Runtime, ApprovalOutcome, ApprovalRequest } from "./approval-client.js"
 export { evaluatePolicy } from "./policy.js"
 export type { PolicyContext, PolicyDecision, PolicyManifest, PolicyRule } from "./policy.js"
 
@@ -27,6 +27,8 @@ export interface IntygaConfig {
    */
   timeoutMs?: number
   intervalMs?: number
+  /** RP-owned v1 PEP. Required when clientId identifies an AI_AGENT. */
+  agentV1?: import("./approval-client.js").AgentV1Runtime
 }
 
 type ToolHandler = (handlerArgs: Record<string, unknown>, extra: unknown) => Promise<unknown>
@@ -48,13 +50,21 @@ export function intygafyServer(server: McpServer, config: IntygaConfig) {
   const gate =
     (name: string, originalHandler: ToolHandler): ToolHandler =>
     async (handlerArgs: Record<string, unknown>, extra: unknown): Promise<unknown> => {
-      // 1. Evaluate policy (local-first check)
-      const decision = evaluatePolicy(name, handlerArgs, config)
-
-      // If the policy allows, execute the tool immediately
-      if (decision === "allow") {
-        return originalHandler(handlerArgs, extra)
+      // Bind the bytes sent for approval to the args handed to the tool. MCP arguments are JSON;
+      // snapshot them before any await so another task cannot mutate the caller's object while a
+      // human is deciding. A non-JSON value is refused rather than guessed into a signed action.
+      let boundArgs: Record<string, unknown>
+      try {
+        const raw = JSON.stringify(handlerArgs)
+        const parsed: unknown = JSON.parse(raw)
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+          throw new Error("tool arguments must be a JSON object")
+        boundArgs = parsed as Record<string, unknown>
+      } catch {
+        return { content: [{ type: "text", text: "Intyga Gateway Error: tool arguments are not JSON" }] }
       }
+      // 1. Evaluate policy (local-first check)
+      const decision = evaluatePolicy(name, boundArgs, config)
 
       // If the policy denies, block the action immediately
       if (decision === "deny") {
@@ -75,14 +85,15 @@ export function intygafyServer(server: McpServer, config: IntygaConfig) {
         clientSecret: config.clientSecret,
         target: config.target ?? config.agentId,
         actionType: name,
-        params: handlerArgs,
-        actionDescription: `Authorize action '${name}' with parameters: ${JSON.stringify(handlerArgs)}`,
+        params: boundArgs,
+        actionDescription: `Authorize action '${name}' with parameters: ${JSON.stringify(boundArgs)}`,
         timeoutMs: config.timeoutMs,
         intervalMs: config.intervalMs,
+        agentV1: config.agentV1,
       })
 
       if (outcome.outcome === "approved") {
-        return originalHandler(handlerArgs, extra)
+        return originalHandler(boundArgs, extra)
       } else if (outcome.outcome === "refused") {
         return {
           content: [

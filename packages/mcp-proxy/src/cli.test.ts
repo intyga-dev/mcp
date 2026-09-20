@@ -5,6 +5,7 @@
 
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
+import { createServer } from "node:http"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -44,10 +45,21 @@ const QUIET_MS = 300
  * on. What matters for every case here is the same: after a fixed settle window, did the request
  * reach the target server or not?
  */
-function runProxy(lines: string[], opts: { policy?: string; enforcement?: string } = {}) {
+function runProxy(
+  lines: string[],
+  opts: {
+    policy?: string
+    enforcement?: string
+    agentV1Module?: string
+    gatewayUrl?: string
+    quietMs?: number
+  } = {},
+) {
   return new Promise<string>((resolve, reject) => {
     const args = [CLI, "--target-command", "cat", "--enforcement", opts.enforcement ?? "local-first"]
     if (opts.policy) args.push("--local-policy", opts.policy)
+    if (opts.agentV1Module) args.push("--agent-v1-module", opts.agentV1Module)
+    if (opts.gatewayUrl) args.push("--gateway-url", opts.gatewayUrl)
 
     // `node --import tsx` rather than `npx tsx`: npx spawns tsx which spawns node, and killing the
     // top of that chain orphans the grandchild — which then holds this test's stdout pipe open and
@@ -76,20 +88,41 @@ function runProxy(lines: string[], opts: { policy?: string; enforcement?: string
     const poll = setInterval(() => {
       // Quiet only counts once something has arrived — otherwise a slow boot looks like silence and
       // every test would resolve empty in QUIET_MS.
-      if (out.length > 0 && Date.now() - lastData >= QUIET_MS) return finish()
+      if (out.length > 0 && Date.now() - lastData >= (opts.quietMs ?? QUIET_MS)) return finish()
       if (Date.now() - started >= SETTLE_CAP_MS) return finish()
     }, 50)
   })
 }
 
-test("an allowed tool call is forwarded to the target server", async () => {
+test("a local allow without v1 runtime still waits for the gateway", async () => {
   const line = rpc("tools/call", { name: "read_report", arguments: {} })
   const out = await runProxy([line], {
     policy: policyFile([{ action: "read_report", effect: "allow" }]),
   })
-  // `cat` echoed it, so the proxy passed it through.
-  assert.match(out, /"method":"tools\/call"/)
-  assert.doesNotMatch(out, /Security Violation/)
+  assert.doesNotMatch(out, /"method":"tools\/call"/)
+  assert.match(out, /Intyga Gateway Error/)
+})
+
+test("v1 agent mode does not forward a local allow without a verified receipt", async () => {
+  const modulePath = path.join(tmp, "agent-v1-test.mjs")
+  fs.writeFileSync(
+    modulePath,
+    `export default {
+    requesterDid: "did:intyga:agent:test",
+    approvers: { publicKeys: [] },
+    verifier: {},
+    prepare: async () => { throw new Error("trusted RP context unavailable") },
+    liveConfig: async () => { throw new Error("trusted RP context unavailable") },
+    readState: async () => { throw new Error("trusted RP state unavailable") },
+    reserve: async () => false,
+  }`,
+  )
+  const out = await runProxy([rpc("tools/call", { name: "read_report", arguments: {} })], {
+    policy: policyFile([{ action: "read_report", effect: "allow" }]),
+    agentV1Module: modulePath,
+  })
+  assert.doesNotMatch(out, /"method":"tools\/call"/)
+  assert.match(out, /Intyga Gateway Error/)
 })
 
 test("a denied tool call is refused and never reaches the target", async () => {
@@ -171,20 +204,33 @@ test("protocol traffic is not stuck behind a pending approval", async () => {
   assert.doesNotMatch(out, /"method":"tools\/call"/)
 })
 
-test("tool calls reach the target in the order they were sent", async () => {
+test("approved tool calls reach the target in the order they were sent", async (t) => {
   // Bypassing the queue is only safe for non-tool traffic — tool calls must stay ordered relative to
   // each other, since two mutating actions arriving out of order is a correctness bug.
   //
-  // Note this checks ordering, not blocking. Proving that a *pending* approval holds the next tool
-  // call back needs a gateway that keeps a challenge open; with none reachable the first call fails
-  // fast, so that half of the contract is only exercised against a live gateway (see e2e-roundtrip).
+  let nextNonce = 0
+  const server = createServer((req, res) => {
+    res.setHeader("content-type", "application/json")
+    if (req.url === "/oauth/token") return void res.end(JSON.stringify({ access_token: "test-token" }))
+    if (req.url === "/authorize/verify") return void res.end(JSON.stringify({ ok: true }))
+    if (req.url === "/authorize") return void res.end(JSON.stringify({ nonce: `n-${++nextNonce}` }))
+    return void res.end(JSON.stringify({ status: "APPROVED" }))
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  t.after(() => server.close())
+  const address = server.address()
+  assert.ok(address && typeof address !== "string")
   const out = await runProxy(
     [
       rpc("tools/call", { name: "read_report", arguments: { seq: 1 } }, 1),
       rpc("tools/call", { name: "read_report", arguments: { seq: 2 } }, 2),
       rpc("tools/call", { name: "read_report", arguments: { seq: 3 } }, 3),
     ],
-    { policy: policyFile([{ action: "read_report", effect: "allow" }]) },
+    {
+      policy: policyFile([{ action: "read_report", effect: "allow" }]),
+      gatewayUrl: `http://127.0.0.1:${address.port}`,
+      quietMs: 2_500, // the production approval poll is 2s per queued call
+    },
   )
   const order = [...out.matchAll(/"seq":(\d)/g)].map((m) => m[1])
   assert.deepEqual(order, ["1", "2", "3"], `tool calls arrived out of order: ${out}`)

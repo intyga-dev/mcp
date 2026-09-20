@@ -1,9 +1,16 @@
 # @intyga/mcp-proxy — human approval in front of any MCP server, no code changes
 
 A stdio proxy that sits between an MCP client (the agent) and a third-party MCP server. Every
-`tools/call` is checked against your local policy and, when the policy does not explicitly allow
-it, held until a human approves it with a passkey / hardware security key via your Intyga gateway.
+`tools/call` is checked against your local policy; a `deny` is refused locally and every other
+result goes through your Intyga gateway's authorization flow. AI-agent execution also requires a
+v1 receipt and RP check of the human approval.
 The wrapped server is not modified and is deliberately not trusted.
+
+For an `AI_AGENT` key, pass `--agent-v1-module` pointing to an RP-owned JavaScript module whose
+default export implements `AgentV1Runtime` from `@intyga/mcp-sdk`. The proxy then sends the v1
+`agentContext`, verifies the complete receipt against RP-pinned approvers and live configuration,
+and requires an atomic nonce/session/budget reservation before forwarding the call. Without that
+module the gateway refuses AI-agent requests.
 
 ```sh
 intyga-proxy \
@@ -11,6 +18,7 @@ intyga-proxy \
   --target-args '["-y", "@modelcontextprotocol/server-filesystem", "/data"]' \
   --agent-id did:intyga:agent-fs \
   --target fileserver-prod \
+  --agent-v1-module ./rp-agent-v1.mjs \
   --local-policy ./policy.json
 ```
 
@@ -30,6 +38,7 @@ proxy spawns the real server as a child and mediates the protocol stream.
 | `--local-policy` | — | Path to a policy manifest JSON — same format and same evaluator as [`@intyga/mcp-sdk`](../mcp-sdk), so the two enforcement paths cannot disagree |
 | `--target-command` | — | The real MCP server executable (required) |
 | `--target-args` | — | Its arguments, as a JSON **array of strings** — an object is refused, because Node would read it as the spawn *options* and a `{"shell": true}` smuggle would turn the command into a shell string |
+| `--agent-v1-module` | `INTYGA_AGENT_V1_MODULE` | Absolute or relative path to the trusted RP v1 runtime module. Mandatory for AI-agent keys. Export `default` with `requesterDid`, `approvers`, `verifier`, `prepare`, `liveConfig`, `readState`, and `reserve` as documented in [`@intyga/mcp-sdk`](../mcp-sdk). |
 
 ## Security properties (each of these is tested)
 
@@ -47,8 +56,15 @@ proxy spawns the real server as a child and mediates the protocol stream.
   other, and a runaway agent cannot fan out unbounded approval prompts. Non-mutating protocol
   traffic (`initialize`, `ping`, `*/list`) bypasses the queue so a pending human decision cannot
   make the client conclude the server is dead.
+- **v1 agent calls require a receipt and an RP reservation.** Even a local `allow` rule cannot skip
+  that check, including when `--agent-v1-module` was omitted. The gateway refuses an AI-agent key
+  without its v1 context. `reserve` must use a durable compare-and-swap
+  transaction and enforce the budget across sessions. The proxy does not provide a database or a
+  trustworthy view of the agent's actual model, tools or prompt; your RP module must provide both.
 - **The wrapped server never sees your Intyga credentials.** Every `INTYGA_*` variable is stripped
-  from the child's environment; everything else passes through.
+  from the child's environment; everything else passes through. Run untrusted third-party servers
+  under a separate OS identity or sandbox so they cannot read the RP module's state, files or parent
+  process. Environment filtering alone is not an OS security boundary.
 
 ## Runtime
 

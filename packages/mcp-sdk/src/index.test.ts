@@ -82,7 +82,14 @@ test("a registration with no handler is passed straight through untouched", () =
   assert.deepEqual(registered[0], ["transfer", { schema: true }])
 })
 
-test("an allowed action reaches the original handler with its arguments", async () => {
+test("a local allow still requires gateway approval", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  globalThis.fetch = (async () => {
+    throw new Error("gateway unavailable")
+  }) as typeof fetch
   let seen: unknown
   const { secured } = wrapHandler(
     {
@@ -94,11 +101,71 @@ test("an allowed action reaches the original handler with its arguments", async 
       return "executed"
     },
   )
-  assert.equal(await secured({ amount: 5 }, {}), "executed")
-  assert.deepEqual(seen, { amount: 5 })
+  await secured({ amount: 5 }, {})
+  assert.equal(seen, undefined)
 })
 
-test("the handler's extra context argument is forwarded", async () => {
+test("a v1 agent cannot bypass its receipt through a local allow rule", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  globalThis.fetch = (async () => {
+    throw new Error("gateway unavailable")
+  }) as typeof fetch
+  let executed = false
+  const { secured } = wrapHandler(
+    {
+      enforcement: "local-first",
+      localPolicyJson: JSON.stringify({ rules: [{ action: "transfer", effect: "allow" }] }),
+      agentV1: { requesterDid: "did:intyga:agent:test" },
+    },
+    async () => {
+      executed = true
+      return "executed"
+    },
+  )
+  await secured({ amount: 5 }, {})
+  assert.equal(executed, false)
+})
+
+test("the approved JSON arguments are the arguments handed to the tool", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  const reply = (body: unknown) => ({ ok: true, status: 200, json: async () => body }) as unknown as Response
+  globalThis.fetch = (async (url: unknown) => {
+    const path = String(url)
+    if (path.endsWith("/oauth/token")) return reply({ access_token: "token" })
+    if (path.endsWith("/authorize/verify")) return reply({ ok: true })
+    if (path.endsWith("/authorize")) return reply({ nonce: "n-1", status: "PENDING" })
+    return reply({ status: "APPROVED" })
+  }) as typeof fetch
+  let executed: unknown
+  const { secured } = wrapHandler({ intervalMs: 1 }, async (args: unknown) => {
+    executed = args
+  })
+  const mutable = { amount: 5 }
+  const pending = secured(mutable, {})
+  mutable.amount = 5000
+  await pending
+  assert.deepEqual(executed, { amount: 5 })
+})
+
+test("the handler's extra context argument is forwarded", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  const reply = (body: unknown) => ({ ok: true, status: 200, json: async () => body }) as unknown as Response
+  globalThis.fetch = (async (url: unknown) => {
+    const path = String(url)
+    if (path.endsWith("/oauth/token")) return reply({ access_token: "token" })
+    if (path.endsWith("/authorize/verify")) return reply({ ok: true })
+    if (path.endsWith("/authorize")) return reply({ nonce: "n-1", status: "PENDING" })
+    return reply({ status: "APPROVED" })
+  }) as typeof fetch
   let seenExtra: unknown
   const { secured } = wrapHandler(
     {
@@ -350,8 +417,8 @@ test("update() that renames AND replaces the handler gates against the new name"
     {
       ...CONFIG,
       enforcement: "local-first",
-      // Permissive for the OLD name only. If the wrapper gated against it, the handler would run.
-      localPolicyJson: JSON.stringify({ rules: [{ action: "old_name", effect: "allow" }] }),
+      // Denied for the OLD name only. The new name should reach the gateway instead.
+      localPolicyJson: JSON.stringify({ rules: [{ action: "old_name", effect: "deny" }] }),
     } as never,
   )
 
@@ -372,7 +439,7 @@ test("update() that renames AND replaces the handler gates against the new name"
   const replaced = (updateCall[1] as { callback: ToolFn }).callback
   const out = (await replaced({}, {})) as { content: { text: string }[] }
   assert.equal(ran, false, "the renamed tool was judged by the old name's policy")
-  assert.match(out.content[0]!.text, /Intyga/)
+  assert.match(out.content[0]!.text, /Gateway Error/)
 })
 
 test("a registration whose first argument is not a name still gates, under an empty name", () => {

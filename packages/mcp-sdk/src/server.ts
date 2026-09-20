@@ -1,7 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
+import fs from "node:fs"
+import { pathToFileURL } from "node:url"
 import { z } from "zod"
-import { intygafyServer } from "./index.js"
+import { intygafyServer, type AgentV1Runtime } from "./index.js"
 
 const server = new McpServer({
   name: "intyga-secured-server",
@@ -10,18 +12,32 @@ const server = new McpServer({
 
 // 1. APPLY MIDDLEWARE FIRST
 // This ensures every future call to server.tool is captured.
-// Credentials come from the environment — never hardcode a client secret. Get these from the Intyga
-// console (My Agents → create agent → mint agent key); the fallbacks below are local-dev placeholders.
+// This runnable example uses an AI_AGENT key. The RP-owned v1 module must provide live configuration,
+// trusted approvers and a durable nonce/session/budget reservation. It cannot be supplied by the model.
+const modulePath = process.env.INTYGA_AGENT_V1_MODULE
+if (!modulePath) throw new Error("INTYGA_AGENT_V1_MODULE is required for an AI_AGENT tool server")
+const agentV1 = (await import(pathToFileURL(fs.realpathSync(modulePath)).href)).default as AgentV1Runtime
+if (
+  !agentV1?.requesterDid ||
+  !agentV1.prepare ||
+  !agentV1.liveConfig ||
+  !agentV1.readState ||
+  !agentV1.reserve
+)
+  throw new Error("INTYGA_AGENT_V1_MODULE must export an RP-owned AgentV1Runtime")
+if (!process.env.INTYGA_CLIENT_ID || !process.env.INTYGA_CLIENT_SECRET)
+  throw new Error("INTYGA_CLIENT_ID and INTYGA_CLIENT_SECRET are required")
 intygafyServer(server, {
   gatewayUrl: process.env.INTYGA_GATEWAY_URL || "http://localhost:8787",
-  clientId: process.env.INTYGA_CLIENT_ID || "did:intyga:human-owner",
-  clientSecret: process.env.INTYGA_CLIENT_SECRET || "dev_secret_key",
-  agentId: process.env.INTYGA_AGENT_ID || "did:intyga:agent-001",
+  clientId: process.env.INTYGA_CLIENT_ID,
+  clientSecret: process.env.INTYGA_CLIENT_SECRET,
+  agentId: process.env.INTYGA_AGENT_ID || agentV1.requesterDid,
+  agentV1,
   enforcement: "local-first",
   localPolicyJson: JSON.stringify({
     version: "2026.07.05-1",
     rules: [
-      { action: "get_status", effect: "allow" },
+      { action: "get_status", effect: "allow" }, // still requires a signed approval
       { action: "delete_user", effect: "deny" },
       {
         action: "wire_transfer",

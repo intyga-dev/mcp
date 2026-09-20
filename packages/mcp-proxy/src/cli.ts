@@ -3,7 +3,8 @@
 import { spawn } from "node:child_process"
 import fs from "node:fs"
 import readline from "node:readline"
-import { evaluatePolicy, requestApproval } from "@intyga/mcp-sdk"
+import { evaluatePolicy, requestApproval, type AgentV1Runtime } from "@intyga/mcp-sdk"
+import { pathToFileURL } from "node:url"
 
 // Simple CLI arguments parser
 const args = process.argv.slice(2)
@@ -19,6 +20,7 @@ const enforcement = getArg("--enforcement") || "local-first"
 const localPolicyPath = getArg("--local-policy") || ""
 const targetCommand = getArg("--target-command") || ""
 const targetArgsStr = getArg("--target-args") || "[]"
+const agentV1Module = getArg("--agent-v1-module") || process.env.INTYGA_AGENT_V1_MODULE || ""
 
 function getArg(flag: string): string | null {
   const index = args.indexOf(flag)
@@ -55,6 +57,25 @@ try {
 } catch (err) {
   console.error(`Error: --target-args must be a JSON array of strings: ${(err as Error).message}`)
   process.exit(1)
+}
+
+// The module belongs to the relying party, not the MCP caller or wrapped server. It owns the
+// live-config source and atomic session/nonce/budget store required by the v1 execution PEP.
+let agentV1: AgentV1Runtime | undefined
+if (agentV1Module) {
+  const candidate: unknown = (await import(pathToFileURL(fs.realpathSync(agentV1Module)).href)).default
+  if (
+    !candidate ||
+    typeof candidate !== "object" ||
+    !["prepare", "liveConfig", "readState", "reserve"].every(
+      (key) => typeof (candidate as Record<string, unknown>)[key] === "function",
+    ) ||
+    typeof (candidate as Record<string, unknown>).requesterDid !== "string" ||
+    !(candidate as Record<string, unknown>).approvers ||
+    !(candidate as Record<string, unknown>).verifier
+  )
+    throw new Error("--agent-v1-module must export an RP-owned AgentV1Runtime")
+  agentV1 = candidate as AgentV1Runtime
 }
 
 if (getArg("--client-secret")) {
@@ -249,11 +270,6 @@ async function processToolCall(call: ToolCall, canonical: string): Promise<void>
       localPolicyJson,
     })
 
-    if (decision === "allow") {
-      forwardToChild(canonical)
-      return
-    }
-
     if (decision === "deny") {
       writeError(id, -32603, `Security Violation: Action '${name}' is denied by Intyga policy.`)
       return
@@ -268,6 +284,7 @@ async function processToolCall(call: ToolCall, canonical: string): Promise<void>
       actionType: name,
       params: handlerArgs,
       actionDescription: `Authorize action '${name}' with parameters: ${JSON.stringify(handlerArgs)}`,
+      agentV1,
     })
 
     if (outcome.outcome === "approved") {

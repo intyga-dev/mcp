@@ -96,16 +96,17 @@ async function runSimulation() {
     }
   }
 
-  // Case 1: get_status (Policy allows -> Should execute instantly offline)
-  console.log("\n--- Case 1: Policy Allows (get_status) ---")
+  // A local allow never executes a tool by itself; with this deliberately incomplete dev config,
+  // the gateway refuses the request or the connection fails closed.
+  console.log("\n--- Case 1: Local allow still requires a gateway approval (get_status) ---")
   await simulateCall("get_status", {})
 
   // Case 2: delete_user (Policy denies -> Should block instantly offline)
   console.log("\n--- Case 2: Policy Denies (delete_user) ---")
   await simulateCall("delete_user", { userId: "user-456" })
 
-  // Case 3: wire_transfer below limit (Policy allows -> Should execute instantly offline)
-  console.log("\n--- Case 3: Policy Allows below limit (wire_transfer $500) ---")
+  // Case 3: a local allow under the limit still requires a gateway approval.
+  console.log("\n--- Case 3: Local allow still requires approval (wire_transfer $500) ---")
   await simulateCall("wire_transfer", { amount: 500, recipient: "Alice" })
 
   // Case 4: wire_transfer exceeding limit (Policy allows but escalates to approval -> gateway request)

@@ -1,4 +1,37 @@
 import { z } from "zod"
+import {
+  agentConfigDigest,
+  verifyAgentForExecution,
+  type AgentIntentContext,
+  type AgentSessionState,
+  type ApproverTrustAnchor,
+  type LiveAgentConfig,
+} from "@intyga/sdk"
+
+type AgentInput = {
+  action: AgentIntentContext["action"]
+  delegatedBy: string | null
+  session: AgentIntentContext["session"]
+}
+
+/** RP-owned inputs and atomic state operations. None may be sourced from the MCP caller or receipt. */
+export interface AgentV1Runtime {
+  requesterDid: string
+  approvers: ApproverTrustAnchor
+  verifier: NonNullable<Parameters<typeof verifyAgentForExecution>[4]>
+  prepare(actionType: string, params: Record<string, unknown>): Promise<AgentInput>
+  liveConfig(): Promise<LiveAgentConfig>
+  readState(sessionId: string): Promise<AgentSessionState>
+  /** Atomically compare the prior state, reserve aggregate budget, consume nonce and save the head.
+   * Return false on conflict, duplicate nonce or budget refusal. Never return true without persisting. */
+  reserve(input: {
+    nonce: string
+    sessionId: string
+    prior: AgentSessionState
+    next: AgentSessionState
+    amount: AgentIntentContext["action"]["amount"]
+  }): Promise<boolean>
+}
 
 // The out-of-band approval round trip: authenticate, raise a challenge, wait for the human, then
 // consume it exactly once before the action runs. Both enforcement paths — the in-process wrapper
@@ -47,6 +80,8 @@ export interface ApprovalRequest {
   timeoutMs?: number
   /** How often to re-check, in ms. Default 2 seconds. */
   intervalMs?: number
+  /** Mandatory for AI_AGENT keys. Provides v1 context and the RP's execution-time PEP. */
+  agentV1?: AgentV1Runtime
 }
 
 export type ApprovalOutcome =
@@ -58,6 +93,16 @@ export type ApprovalOutcome =
 const MAX_POLL_ERRORS = 5
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+async function fromRp<T>(operation: string, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run()
+  } catch {
+    // RP adapters may throw DB errors containing private connection details. The MCP caller is
+    // untrusted; report only which local check failed, never the adapter's raw exception.
+    throw new Error(`RP ${operation} unavailable`)
+  }
+}
 
 async function getToken(req: ApprovalRequest): Promise<string> {
   const basic = Buffer.from(`${req.clientId}:${req.clientSecret}`).toString("base64")
@@ -87,7 +132,11 @@ async function getToken(req: ApprovalRequest): Promise<string> {
  * token also unlocks `/internal/metrics`, `/metrics/usage/:tenantId`, and every console step-up
  * request/status/consume for the whole deployment.
  */
-async function openChallenge(req: ApprovalRequest, token: string): Promise<string> {
+async function openChallenge(
+  req: ApprovalRequest,
+  token: string,
+  agentInput?: AgentInput & { configDigest: string },
+): Promise<{ nonce: string; agentContext?: AgentIntentContext }> {
   const res = await fetch(`${req.gatewayUrl}/authorize`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
@@ -95,6 +144,7 @@ async function openChallenge(req: ApprovalRequest, token: string): Promise<strin
       target: req.target,
       actionType: req.actionType,
       params: req.params,
+      ...(agentInput ? { agentContext: agentInput } : {}),
       actionDescription:
         req.actionDescription ??
         `Authorize action '${req.actionType}' with parameters: ${JSON.stringify(req.params)}`,
@@ -109,7 +159,7 @@ async function openChallenge(req: ApprovalRequest, token: string): Promise<strin
         (requestId ? ` [requestId ${requestId}]` : ""),
     )
   }
-  return ((await res.json()) as { nonce: string }).nonce
+  return (await res.json()) as { nonce: string; agentContext?: AgentIntentContext }
 }
 
 /**
@@ -131,7 +181,7 @@ async function waitForVerdict(
   req: ApprovalRequest,
   initialToken: string,
   nonce: string,
-): Promise<{ status: string; token: string }> {
+): Promise<{ status: string; token: string; receipt?: unknown }> {
   const timeoutMs = req.timeoutMs ?? 120_000
   const intervalMs = req.intervalMs ?? 2_000
   const deadline = Date.now() + timeoutMs
@@ -151,9 +201,9 @@ async function waitForVerdict(
         continue
       }
       if (!res.ok) throw new Error(`status check failed (${res.status})`)
-      const { status } = (await res.json()) as { status: string }
+      const { status, receipt } = (await res.json()) as { status: string; receipt?: unknown }
       consecutiveErrors = 0
-      if (status !== "PENDING") return { status, token }
+      if (status !== "PENDING") return { status, token, receipt }
     } catch (err) {
       if (++consecutiveErrors >= MAX_POLL_ERRORS) {
         throw new Error(
@@ -190,19 +240,93 @@ async function consume(req: ApprovalRequest, token: string, nonce: string): Prom
 /** Run the full approval round trip. Never throws — every failure is reported as a refusal. */
 export async function requestApproval(req: ApprovalRequest): Promise<ApprovalOutcome> {
   try {
-    const initialToken = await getToken(req)
-    const nonce = await openChallenge(req, initialToken)
-    const { status, token } = await waitForVerdict(req, initialToken, nonce)
+    const params: unknown = JSON.parse(JSON.stringify(req.params))
+    if (typeof params !== "object" || params === null || Array.isArray(params))
+      throw new Error("approval parameters must be a JSON object")
+    const boundReq = { ...req, params: params as Record<string, unknown> }
+    const initialToken = await getToken(boundReq)
+    const runtime = boundReq.agentV1
+    const prepared = runtime
+      ? await fromRp("agent context", () =>
+          runtime.prepare(
+            boundReq.actionType,
+            JSON.parse(JSON.stringify(boundReq.params)) as Record<string, unknown>,
+          ),
+        )
+      : undefined
+    const agentInput =
+      runtime && prepared
+        ? {
+            ...prepared,
+            configDigest: agentConfigDigest(
+              await fromRp("live agent configuration", () => runtime.liveConfig()),
+            ),
+          }
+        : undefined
+    const opened = await openChallenge(boundReq, initialToken, agentInput)
+    const { nonce } = opened
+    const { status, token, receipt } = await waitForVerdict(boundReq, initialToken, nonce)
 
     if (status !== "APPROVED") {
       return {
         outcome: "refused",
         status,
-        reason: `Action '${req.actionType}' was rejected or timed out (status: ${status}).`,
+        reason: `Action '${boundReq.actionType}' was rejected or timed out (status: ${status}).`,
       }
     }
 
-    await consume(req, token, nonce)
+    if (runtime) {
+      // The issuer's nbf and registered DID are retained from the opening response, never copied
+      // from the receipt being verified. The other claims are the RP's own prepared context.
+      const issued = opened.agentContext
+      if (
+        !issued ||
+        !agentInput ||
+        issued.agent.label !== runtime.requesterDid ||
+        issued.agent.configDigest !== agentInput.configDigest ||
+        issued.agent.delegatedBy !== agentInput.delegatedBy ||
+        JSON.stringify(issued.action) !== JSON.stringify(agentInput.action) ||
+        JSON.stringify(issued.session) !== JSON.stringify(agentInput.session) ||
+        !receipt
+      )
+        throw new Error("Gateway did not return the requested v1 agent context and receipt")
+
+      // Gateway redemption is single-use. A later local refusal burns the approval without running
+      // the tool; that is the safe outcome when configuration, trust or session state changed.
+      await consume(boundReq, token, nonce)
+      const prior = await fromRp("agent session state", () => runtime.readState(issued.session.id))
+      const expected = {
+        approvers: runtime.approvers,
+        target: boundReq.target,
+        actionType: boundReq.actionType,
+        params: boundReq.params,
+        nonce,
+        requesterDid: runtime.requesterDid,
+        agentContext: issued,
+      }
+      const proof = verifyAgentForExecution(
+        receipt as Parameters<typeof verifyAgentForExecution>[0],
+        expected,
+        await fromRp("live agent configuration", () => runtime.liveConfig()),
+        prior,
+        runtime.verifier,
+      )
+      if (!proof.ok || !proof.nextHead)
+        throw new Error(`v1 agent receipt refused: ${proof.reason ?? "no head"}`)
+      const nextHead = proof.nextHead
+      const reserved = await fromRp("agent reservation", () =>
+        runtime.reserve({
+          nonce,
+          sessionId: issued.session.id,
+          prior,
+          next: { head: nextHead, seq: issued.session.seq, aggregate: issued.session.aggregate },
+          amount: issued.action.amount,
+        }),
+      )
+      if (!reserved) throw new Error("v1 agent session, nonce or budget reservation refused")
+    } else {
+      await consume(boundReq, token, nonce)
+    }
     return { outcome: "approved", nonce }
   } catch (err) {
     return { outcome: "error", reason: (err as Error).message }

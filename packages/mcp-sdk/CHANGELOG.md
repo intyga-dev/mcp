@@ -5,6 +5,10 @@ All notable changes to `@intyga/mcp-sdk` are documented here. The format follows
 
 ## [Unreleased]
 
+- AI-agent keys now use the single v1 receipt flow: RP-owned `AgentV1Runtime` supplies the context,
+  live configuration, trusted approvers and durable reservation; the wrapper verifies the receipt
+  before calling a handler. A local `allow` rule can no longer execute a tool on its own.
+- Snapshot MCP JSON arguments before approval so the handler receives the values that were signed.
 - `requestApproval` re-exchanges the client credentials once when a status check answers 401
   mid-wait (the agent token outlived its TTL — a `timeoutMs` longer than the token's life does
   this) and redeems the approval with the new token, instead of counting the 401s as polling
