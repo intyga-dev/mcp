@@ -56,7 +56,7 @@ The endpoint provides two tools:
 * **`check_human_authorization`** — polls by `nonce`; returns `PENDING`, `APPROVED` (with the
   cryptographic signature receipt), `DENIED`, or `EXPIRED`.
 
-The agent requests sign-off, polls until it resolves, then executes its own action.
+The agent requests sign-off, polls until it resolves, then executes its own action..
 
 **2. Wrap your existing MCP server (transparent gating).**
 Use `@intyga/mcp-sdk` to gate the tools you already expose, without teaching the agent to call an
@@ -99,3 +99,5 @@ organization's Approval Rules, which the agent cannot see or weaken.
 
 Apache-2.0. These are the open, inspectable client components — read them before you put them in
 your agent's tool-call path. See each package's `LICENSE`.
+
+---
