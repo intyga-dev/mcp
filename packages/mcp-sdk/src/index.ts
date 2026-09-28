@@ -1,13 +1,18 @@
+import { assertGatewayUrl } from "@intyga/sdk"
 import { requestApproval } from "./approval-client.js"
 import { evaluatePolicy } from "./policy.js"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 
 export { requestApproval } from "./approval-client.js"
+// The gateway-URL rule every Intyga client applies (https://, loopback http for local development),
+// re-exported so the stdio proxy can refuse a bad URL at startup rather than on the first tool call.
+export { assertGatewayUrl } from "@intyga/sdk"
 export type { AgentV1Runtime, ApprovalOutcome, ApprovalRequest } from "./approval-client.js"
 export { evaluatePolicy } from "./policy.js"
 export type { PolicyContext, PolicyDecision, PolicyManifest, PolicyRule } from "./policy.js"
 
 export interface IntygaConfig {
+  /** https:// only; http:// is accepted for a loopback host (local development) and nothing else. */
   gatewayUrl: string
   clientId: string
   clientSecret: string
@@ -47,6 +52,9 @@ type ToolHandler = (handlerArgs: Record<string, unknown>, extra: unknown) => Pro
  * request handler rather than registration, which is the more robust design if this keeps moving.
  */
 export function intygafyServer(server: McpServer, config: IntygaConfig) {
+  // Fail at wiring time, not on the first tool call: a plain-http gateway would carry the client
+  // secret and every approval request in the clear.
+  assertGatewayUrl(config.gatewayUrl)
   const gate =
     (name: string, originalHandler: ToolHandler): ToolHandler =>
     async (handlerArgs: Record<string, unknown>, extra: unknown): Promise<unknown> => {

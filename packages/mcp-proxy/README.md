@@ -29,7 +29,7 @@ proxy spawns the real server as a child and mediates the protocol stream.
 
 | Flag | Env var | Meaning |
 | :--- | :--- | :--- |
-| `--gateway-url` | `INTYGA_GATEWAY_URL` | Intyga gateway (default `http://localhost:8787`) |
+| `--gateway-url` | `INTYGA_GATEWAY_URL` | Intyga gateway (default `http://localhost:8787`). Must be `https://`; plain `http://` is refused at startup except to a loopback host (`localhost`, `127.0.0.0/8`, `::1`) |
 | `--client-id` | `INTYGA_CLIENT_ID` | Agent credential id |
 | `--client-secret` | `INTYGA_CLIENT_SECRET` | **Use the env var.** The flag is accepted but warns: argv is world-readable via `ps`, including by the wrapped server — the one process this proxy exists to distrust |
 | `--agent-id` | `INTYGA_AGENT_ID` | Default value for `--target` when that is unset. Never sent to the gateway — the identity the ledger records as requester comes from the `--client-id` credential exchange |
@@ -51,7 +51,12 @@ proxy spawns the real server as a child and mediates the protocol stream.
   removed batching in revision 2025-06-18; one request per line.
 - **The approved bytes are the executed bytes.** Messages are re-serialized from the parse this
   proxy evaluated, so a duplicate-key payload cannot read as `ping` here and as a tool call to a
-  target server whose parser resolves duplicates differently.
+  target server whose parser resolves duplicates differently. An approved `tools/call` is rebuilt
+  from exactly the approved `name` and `arguments` (plus `_meta.progressToken`, which only
+  correlates progress notifications); any other `_meta` key, `params` field (including MCP task
+  augmentation) or top-level member is dropped. A `tools/call` whose `name` is not a string, or
+  whose `arguments` is present but not a JSON object, is refused with `-32602` before any approval
+  is requested. Omitted `arguments` becomes `{}` for both approval and execution.
 - **Gated calls run one at a time, FIFO.** Two mutating calls cannot be reordered around each
   other, and a runaway agent cannot fan out unbounded approval prompts. Non-mutating protocol
   traffic (`initialize`, `ping`, `*/list`) bypasses the queue so a pending human decision cannot
@@ -68,8 +73,13 @@ proxy spawns the real server as a child and mediates the protocol stream.
 
 ## Runtime
 
-The binary is TypeScript executed directly: **Node ≥ 24** (type stripping is on by default).
-On older Node, run it via `tsx src/cli.ts …`.
+The published package ships compiled JavaScript (`dist/cli.js`); `npx @intyga/mcp-proxy` and a
+global install both run it with no toolchain of their own. **Node ≥ 24.**
+
+It used to ship the TypeScript entry point directly and rely on Node’s type stripping. That cannot
+work from an installed package: Node refuses to strip types for any file under `node_modules`
+(`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`), at every version, so the only entry point failed on
+first run. Working from a clone is unaffected — `tsx src/cli.ts …` still runs the source.
 
 ## License
 

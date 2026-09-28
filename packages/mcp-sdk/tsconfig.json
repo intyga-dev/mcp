@@ -4,6 +4,7 @@
     "target": "ESNext",
     "outDir": "./dist",
     "rootDir": "./src",
+    "sourceMap": false,
     "types": ["node"]
   },
   "include": ["src/**/*"],

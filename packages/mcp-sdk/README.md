@@ -123,6 +123,10 @@ changes to the server, put [`@intyga/mcp-proxy`](../mcp-proxy) in front of it in
 `agentId`), `enforcement?` (`"local-first"` default | `"gateway-enforced"`), `localPolicyJson?`,
 `timeoutMs?`, `intervalMs?`, `agentV1?` (required with an AI_AGENT key).
 
+`gatewayUrl` must be `https://`: `intygafyServer` throws (and `requestApproval` returns an `error`
+outcome) for plain `http://` except to a loopback host (`localhost`, `127.0.0.0/8`, `::1`), and no
+gateway request follows a redirect.
+
 ## Related
 
 - [`@intyga/mcp-proxy`](../mcp-proxy) — the same gate as a stdio proxy, for servers you don't own.

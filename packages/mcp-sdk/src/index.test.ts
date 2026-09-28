@@ -37,7 +37,7 @@ function fakeServer() {
 }
 
 const CONFIG = {
-  gatewayUrl: "http://gw.example",
+  gatewayUrl: "https://gw.example",
   clientId: "id",
   clientSecret: "secret",
   agentId: "agent-1",
@@ -451,4 +451,15 @@ test("a registration whose first argument is not a name still gates, under an em
   const args = registered[0]!
   assert.notEqual(args[args.length - 1], undefined)
   assert.equal(typeof args[args.length - 1], "function")
+})
+
+test("intygafyServer refuses a plain-http, non-loopback gateway at wiring time", () => {
+  assert.throws(
+    () =>
+      intygafyServer(fakeServer().server as never, { ...CONFIG, gatewayUrl: "http://gw.example" } as never),
+    /gatewayUrl must use https:\/\//,
+  )
+  assert.doesNotThrow(() =>
+    intygafyServer(fakeServer().server as never, { ...CONFIG, gatewayUrl: "http://localhost:8787" } as never),
+  )
 })

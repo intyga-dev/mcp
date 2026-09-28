@@ -20,7 +20,7 @@
   ],
   "type": "module",
   "files": [
-    "src/cli.ts",
+    "dist",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -32,9 +32,10 @@
     "node": ">=24"
   },
   "bin": {
-    "intyga-proxy": "./src/cli.ts"
+    "intyga-proxy": "./dist/cli.js"
   },
   "scripts": {
+    "build": "tsc --project tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test 'src/**/*.test.ts'",
     "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-lines=98 --test-coverage-branches=98 --test-coverage-functions=98 'src/**/*.test.ts'"
@@ -45,6 +46,6 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@intyga/mcp-sdk": "workspace:*"
+    "@intyga/mcp-sdk": "workspace:^"
   }
 }

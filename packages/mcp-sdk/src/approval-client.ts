@@ -1,6 +1,10 @@
 import { z } from "zod"
 import {
   agentConfigDigest,
+  assertGatewayUrl,
+  GATEWAY_TIMEOUT_MS,
+  isRedirect,
+  redirectHint,
   verifyAgentForExecution,
   type AgentIntentContext,
   type AgentSessionState,
@@ -60,6 +64,7 @@ const publicApiError = z.object({
 })
 
 export interface ApprovalRequest {
+  /** https:// only; http:// is accepted for a loopback host (local development) and nothing else. */
   gatewayUrl: string
   clientId: string
   clientSecret: string
@@ -104,9 +109,26 @@ async function fromRp<T>(operation: string, run: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * A redirect from the gateway. Never followed (`redirect: "manual"` on every request below): fetch
+ * re-sends a POST body on a 307/308, and these bodies carry the approval request and the client
+ * credentials' token. Its own class so the status poll can stop at once instead of counting it as a
+ * transient blip.
+ */
+class RedirectRefused extends Error {}
+
+/** Every gateway request: never follow a redirect, and bound the wait (matches IntygaClient). */
+function gatewayFetch(url: string, init: RequestInit): Promise<Response> {
+  return fetch(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS) })
+}
+
+function refuseRedirect(res: Response, op: string): void {
+  if (isRedirect(res)) throw new RedirectRefused(`${op} failed (status ${res.status}): ${redirectHint(res)}`)
+}
+
 async function getToken(req: ApprovalRequest): Promise<string> {
   const basic = Buffer.from(`${req.clientId}:${req.clientSecret}`).toString("base64")
-  const res = await fetch(`${req.gatewayUrl}/oauth/token`, {
+  const res = await gatewayFetch(`${req.gatewayUrl}/oauth/token`, {
     method: "POST",
     headers: {
       Authorization: `Basic ${basic}`,
@@ -114,6 +136,7 @@ async function getToken(req: ApprovalRequest): Promise<string> {
     },
     body: "grant_type=client_credentials",
   })
+  refuseRedirect(res, "Authentication with the Intyga gateway")
   if (!res.ok) throw new Error(`Failed to authenticate with Intyga gateway (status ${res.status})`)
   return ((await res.json()) as { access_token: string }).access_token
 }
@@ -137,7 +160,7 @@ async function openChallenge(
   token: string,
   agentInput?: AgentInput & { configDigest: string },
 ): Promise<{ nonce: string; agentContext?: AgentIntentContext }> {
-  const res = await fetch(`${req.gatewayUrl}/authorize`, {
+  const res = await gatewayFetch(`${req.gatewayUrl}/authorize`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -150,6 +173,7 @@ async function openChallenge(
         `Authorize action '${req.actionType}' with parameters: ${JSON.stringify(req.params)}`,
     }),
   })
+  refuseRedirect(res, "Requesting the approval challenge")
   if (!res.ok) {
     const parsed = publicApiError.safeParse(await res.json().catch(() => null))
     if (!parsed.success) throw new Error(`Failed to request approval challenge (status ${res.status})`)
@@ -192,9 +216,10 @@ async function waitForVerdict(
   while (Date.now() < deadline) {
     await sleep(intervalMs)
     try {
-      const res = await fetch(`${req.gatewayUrl}/authorize/${encodeURIComponent(nonce)}`, {
+      const res = await gatewayFetch(`${req.gatewayUrl}/authorize/${encodeURIComponent(nonce)}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
+      refuseRedirect(res, "Approval status check")
       if (res.status === 401 && !reauthenticated) {
         reauthenticated = true
         token = await getToken(req)
@@ -205,6 +230,8 @@ async function waitForVerdict(
       consecutiveErrors = 0
       if (status !== "PENDING") return { status, token, receipt }
     } catch (err) {
+      // A redirect is configuration, not a blip: retrying cannot fix it.
+      if (err instanceof RedirectRefused) throw err
       if (++consecutiveErrors >= MAX_POLL_ERRORS) {
         throw new Error(
           `Approval status could not be read after ${MAX_POLL_ERRORS} consecutive failures: ${(err as Error).message}`,
@@ -221,13 +248,14 @@ async function waitForVerdict(
  * claim may already have been spent.
  */
 async function consume(req: ApprovalRequest, token: string, nonce: string): Promise<void> {
-  const res = await fetch(`${req.gatewayUrl}/authorize/verify`, {
+  const res = await gatewayFetch(`${req.gatewayUrl}/authorize/verify`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     // `target` is REQUIRED by the authorizationConsume schema — omitting it is a 400, which would
     // make redemption unreachable and leave the approval replayable for the rest of its TTL.
     body: JSON.stringify({ nonce, target: req.target, actionType: req.actionType, params: req.params }),
   })
+  refuseRedirect(res, "Consuming the approved challenge")
   if (!res.ok) throw new Error("Failed to consume approved signature challenge")
   // A 200 is not automatically a redemption: the gateway reports a params/target mismatch or an
   // already-spent nonce in the body. Executing on that would defeat the re-binding this call is for.
@@ -243,7 +271,12 @@ export async function requestApproval(req: ApprovalRequest): Promise<ApprovalOut
     const params: unknown = JSON.parse(JSON.stringify(req.params))
     if (typeof params !== "object" || params === null || Array.isArray(params))
       throw new Error("approval parameters must be a JSON object")
-    const boundReq = { ...req, params: params as Record<string, unknown> }
+    // Refused before any credential is sent: https:// only, loopback http for local development.
+    const boundReq = {
+      ...req,
+      gatewayUrl: assertGatewayUrl(req.gatewayUrl),
+      params: params as Record<string, unknown>,
+    }
     const initialToken = await getToken(boundReq)
     const runtime = boundReq.agentV1
     const prepared = runtime

@@ -5,12 +5,14 @@
 
 import assert from "node:assert/strict"
 import crypto from "node:crypto"
+import http from "node:http"
+import type { AddressInfo } from "node:net"
 import { test } from "node:test"
 import { agentConfigDigest, canonicalIntentPayload, type AgentIntentContext } from "@intyga/sdk"
 import { requestApproval, type AgentV1Runtime } from "./approval-client.ts"
 
 const BASE = {
-  gatewayUrl: "http://gw.example",
+  gatewayUrl: "https://gw.example",
   clientId: "id",
   clientSecret: "secret",
   target: "prod-payments",
@@ -439,4 +441,100 @@ test("a 200 that does not confirm the redemption is still a refusal", async () =
   } finally {
     globalThis.fetch = original
   }
+})
+
+// ── Transport rules (@intyga/sdk transport.ts): https-only gateway, redirects never followed ──────
+
+test("a plain-http, non-loopback gateway is refused before any request is sent", async () => {
+  const original = globalThis.fetch
+  let calls = 0
+  globalThis.fetch = (async () => {
+    calls++
+    throw new Error("must not be called")
+  }) as typeof fetch
+  try {
+    const r = await requestApproval({ ...BASE, gatewayUrl: "http://gw.example" })
+    assert.equal(r.outcome, "error")
+    assert.match((r as { reason: string }).reason, /gatewayUrl must use https:\/\//)
+    assert.equal(calls, 0)
+  } finally {
+    globalThis.fetch = original
+  }
+})
+
+/**
+ * Two REAL local servers: `origin` plays the gateway and answers the paths in `redirect` with a 307
+ * to the same path on `elsewhere`, which records anything that reaches it. A stub fetch could not
+ * show this — the property is what undici does with a 307, not what the client asks it to do.
+ */
+async function redirectingGateway(
+  t: { after: (fn: () => Promise<void>) => void },
+  redirect: (path: string) => boolean,
+) {
+  const reached: string[] = []
+  const listen = async (server: http.Server) => {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+    t.after(() => new Promise<void>((resolve) => server.close(() => resolve())))
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  }
+  const elsewhere = await listen(
+    http.createServer((req, res) => {
+      let body = ""
+      req.on("data", (c: Buffer) => {
+        body += c.toString()
+      })
+      req.on("end", () => {
+        reached.push(`${req.method} ${req.url} ${body}`)
+        res.setHeader("content-type", "application/json")
+        res.end(JSON.stringify({ access_token: "stolen", nonce: "n-1", status: "APPROVED", ok: true }))
+      })
+    }),
+  )
+  const origin = await listen(
+    http.createServer((req, res) => {
+      req.resume()
+      const path = req.url ?? ""
+      res.setHeader("content-type", "application/json")
+      if (redirect(path)) {
+        res.statusCode = 307
+        res.setHeader("location", `${elsewhere}${path}`)
+        res.end()
+      } else if (path === "/oauth/token") res.end(JSON.stringify({ access_token: "tok" }))
+      else if (path === "/authorize") res.end(JSON.stringify({ nonce: "n-1", status: "PENDING" }))
+      else res.end(JSON.stringify({ status: "APPROVED" }))
+    }),
+  )
+  return { origin, reached }
+}
+
+test("a 307 on the token exchange is not followed: the client secret never reaches the second origin", async (t) => {
+  const { origin, reached } = await redirectingGateway(t, () => true)
+  const r = await requestApproval({ ...BASE, gatewayUrl: origin })
+  assert.equal(r.outcome, "error")
+  assert.match((r as { reason: string }).reason, /status 307.*never follow redirects/)
+  assert.deepEqual(reached, [])
+})
+
+test("a 307 on /authorize is not followed: the approval request never reaches the second origin", async (t) => {
+  const { origin, reached } = await redirectingGateway(t, (p) => p === "/authorize")
+  const r = await requestApproval({ ...BASE, gatewayUrl: origin })
+  assert.equal(r.outcome, "error")
+  assert.match((r as { reason: string }).reason, /Requesting the approval challenge failed \(status 307\)/)
+  assert.deepEqual(reached, [])
+})
+
+test("a 307 on the status poll stops the wait at once instead of counting as a blip", async (t) => {
+  const { origin, reached } = await redirectingGateway(t, (p) => p.startsWith("/authorize/n-1"))
+  const r = await requestApproval({ ...BASE, gatewayUrl: origin, timeoutMs: 5_000 })
+  assert.equal(r.outcome, "error")
+  assert.match((r as { reason: string }).reason, /Approval status check failed \(status 307\)/)
+  assert.deepEqual(reached, [])
+})
+
+test("a 307 on consume is not followed and the action does not run", async (t) => {
+  const { origin, reached } = await redirectingGateway(t, (p) => p === "/authorize/verify")
+  const r = await requestApproval({ ...BASE, gatewayUrl: origin })
+  assert.equal(r.outcome, "error")
+  assert.match((r as { reason: string }).reason, /Consuming the approved challenge failed \(status 307\)/)
+  assert.deepEqual(reached, [])
 })

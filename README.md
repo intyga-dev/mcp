@@ -39,10 +39,20 @@ your client's `mcp.json`:
 }
 ```
 
+`<your_agent_token>` is short-lived — every kind of token `POST /oauth/token` issues, agent included,
+is a 900-second (15-minute) JWT with no revocation path, so the TTL is the whole containment. A
+static header in a config file cannot refresh itself: for anything long-running, exchange a fresh
+token from your agent API key before it expires (`expires_in` in the token response) rather than
+pasting one in once. `@intyga/mcp-sdk` and `@intyga/mcp-proxy` do this automatically; a hand-rolled
+client against the raw endpoint must re-exchange itself.
+
 The endpoint provides two tools:
 
 * **`verify_human_authorization`** — initiates a challenge; returns a `nonce` and `PENDING` while a
-  request goes to the registered human approver's passkey/device.
+  request goes to the registered human approver's passkey/device. **If your agent token's node is
+  registered as `AI_AGENT`** (as opposed to `SERVICE`), you MUST also pass `agentContext` (agent
+  continuity: `action`, `configDigest`, `delegatedBy`, `session`) — the gateway refuses the call
+  without it. See `docs/API.md` §2 for the field shapes; a `SERVICE`-typed token must not send one.
 * **`check_human_authorization`** — polls by `nonce`; returns `PENDING`, `APPROVED` (with the
   cryptographic signature receipt), `DENIED`, or `EXPIRED`.
 

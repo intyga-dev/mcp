@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process"
 import fs from "node:fs"
 import readline from "node:readline"
-import { evaluatePolicy, requestApproval, type AgentV1Runtime } from "@intyga/mcp-sdk"
+import { assertGatewayUrl, evaluatePolicy, requestApproval, type AgentV1Runtime } from "@intyga/mcp-sdk"
 import { pathToFileURL } from "node:url"
 
 // Simple CLI arguments parser
@@ -32,6 +32,15 @@ function getArg(flag: string): string | null {
 
 if (!targetCommand) {
   console.error("Error: --target-command is required")
+  process.exit(1)
+}
+
+// https:// only (loopback http for local development): the client secret and every approval
+// request travel to this URL. Refused at startup, before the target server is spawned.
+try {
+  assertGatewayUrl(gatewayUrl, "--gateway-url / INTYGA_GATEWAY_URL")
+} catch (err) {
+  console.error(`Error: ${(err as Error).message}`)
   process.exit(1)
 }
 
@@ -148,7 +157,7 @@ interface ToolCall {
 }
 
 type Classification =
-  | { kind: "gate"; call: ToolCall; canonical: string }
+  | { kind: "gate"; call: ToolCall; forward: string }
   | { kind: "passthrough"; payload: string }
   | { kind: "reject"; id: unknown; code: number; message: string }
 
@@ -213,22 +222,67 @@ function classify(line: string): Classification {
   if (message.method !== "tools/call") return { kind: "passthrough", payload: canonical }
 
   const params =
-    typeof message.params === "object" && message.params !== null
-      ? (message.params as { name?: unknown; arguments?: unknown })
+    typeof message.params === "object" && message.params !== null && !Array.isArray(message.params)
+      ? (message.params as { name?: unknown; arguments?: unknown; _meta?: unknown })
       : {}
+
+  // A call the gate cannot describe exactly is refused, never approximated. This used to substitute
+  // `{}` for any `arguments` that was not a plain object (and `""` for a non-string name) — and then
+  // forward the ORIGINAL message on approval, so the human approved "drop_database with {}" while
+  // the target received `["production"]`. -32602 is JSON-RPC's "Invalid params".
+  if (typeof params.name !== "string") {
+    return {
+      kind: "reject",
+      id: message.id,
+      code: -32602,
+      message: "Intyga Proxy: tools/call requires params.name to be a string.",
+    }
+  }
   const rawArgs = params.arguments
+  if (rawArgs !== undefined && (typeof rawArgs !== "object" || rawArgs === null || Array.isArray(rawArgs))) {
+    return {
+      kind: "reject",
+      id: message.id,
+      code: -32602,
+      message: "Intyga Proxy: tools/call params.arguments must be a JSON object when present.",
+    }
+  }
+  const args = (rawArgs ?? {}) as Record<string, unknown>
+
   return {
     kind: "gate",
-    canonical,
-    call: {
-      id: message.id,
-      name: typeof params.name === "string" ? params.name : "",
-      args:
-        typeof rawArgs === "object" && rawArgs !== null && !Array.isArray(rawArgs)
-          ? (rawArgs as Record<string, unknown>)
-          : {},
-    },
+    forward: rebuildToolCall(message.id, params.name, args, params._meta),
+    call: { id: message.id, name: params.name, args },
   }
+}
+
+/**
+ * The message the target receives on approval, rebuilt from exactly what was approved rather than
+ * re-serialized from what the client sent. Forwarding the client's message — even canonicalized —
+ * forwards every field the approval never covered.
+ *
+ * Kept: `name` and `arguments` (the approved pair — missing `arguments` becomes `{}` for both
+ * approval and execution), and `_meta.progressToken` when it is a string or finite number. That
+ * token only correlates `notifications/progress` back to this request; it cannot change what runs.
+ *
+ * Dropped: every other `_meta` key and any other `params` field (e.g. MCP task augmentation's
+ * `task`). `_meta` is an open extension namespace that a server hands to its tool handlers, so a
+ * key there is an input the approval did not show; `task` changes how the result is delivered, and
+ * the proxy does not accept execution options on the client's say-so. Unknown top-level members go
+ * too — a JSON-RPC request has four.
+ */
+function rebuildToolCall(id: unknown, name: string, args: Record<string, unknown>, meta: unknown): string {
+  const params: Record<string, unknown> = { name, arguments: args }
+  if (typeof meta === "object" && meta !== null && !Array.isArray(meta)) {
+    const progressToken = (meta as { progressToken?: unknown }).progressToken
+    if (
+      typeof progressToken === "string" ||
+      (typeof progressToken === "number" && Number.isFinite(progressToken))
+    ) {
+      params._meta = { progressToken }
+    }
+  }
+  return JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params })
 }
 
 rl.on("line", (line) => {
@@ -249,9 +303,9 @@ rl.on("line", (line) => {
     return
   }
 
-  const { call, canonical } = classified
+  const { call, forward } = classified
   messageQueue = messageQueue
-    .then(() => processToolCall(call, canonical))
+    .then(() => processToolCall(call, forward))
     .catch((err: unknown) => {
       // processToolCall handles its own failures; this is the backstop for one that escapes. It
       // refuses — it must never fall back to forwarding, which is what the old catch did.
@@ -260,7 +314,7 @@ rl.on("line", (line) => {
     })
 })
 
-async function processToolCall(call: ToolCall, canonical: string): Promise<void> {
+async function processToolCall(call: ToolCall, forward: string): Promise<void> {
   const { id, name, args: handlerArgs } = call
   try {
     // 1. Evaluate policy — the same gate the in-process wrapper uses, so the two enforcement paths
@@ -288,9 +342,9 @@ async function processToolCall(call: ToolCall, canonical: string): Promise<void>
     })
 
     if (outcome.outcome === "approved") {
-      // The canonical form, not the original line: the target executes exactly the parameters the
-      // human was shown and the policy was evaluated against.
-      forwardToChild(canonical)
+      // Rebuilt from the approved call, not the original line: the target executes exactly the
+      // parameters the human was shown and the policy was evaluated against (`rebuildToolCall`).
+      forwardToChild(forward)
       return
     }
 

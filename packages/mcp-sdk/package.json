@@ -46,7 +46,7 @@
     "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-lines=97 --test-coverage-branches=94 --test-coverage-functions=91 --test-coverage-exclude='../**' --test-coverage-exclude='src/**/*.test.ts' 'src/**/*.test.ts'"
   },
   "dependencies": {
-    "@intyga/sdk": "workspace:*",
+    "@intyga/sdk": "workspace:^",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "zod": "^4.5.2"
   },

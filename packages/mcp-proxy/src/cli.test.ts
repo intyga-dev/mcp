@@ -286,3 +286,149 @@ test("gateway-enforced mode ignores a local allow rule", async () => {
   // forwarded to the target without clearance.
   assert.doesNotMatch(out, /"method":"tools\/call"/)
 })
+
+/** A gateway that approves everything and records each `/authorize` body it was asked to approve. */
+async function approvingGateway(t: { after: (fn: () => void) => void }) {
+  const authorizeBodies: unknown[] = []
+  const server = createServer((req, res) => {
+    let body = ""
+    req.on("data", (c: Buffer) => (body += c.toString()))
+    req.on("end", () => {
+      res.setHeader("content-type", "application/json")
+      if (req.url === "/oauth/token") return void res.end(JSON.stringify({ access_token: "test-token" }))
+      if (req.url === "/authorize/verify") return void res.end(JSON.stringify({ ok: true }))
+      if (req.url === "/authorize") {
+        authorizeBodies.push(JSON.parse(body))
+        return void res.end(JSON.stringify({ nonce: `n-${authorizeBodies.length}` }))
+      }
+      return void res.end(JSON.stringify({ status: "APPROVED" }))
+    })
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  t.after(() => server.close())
+  const address = server.address()
+  assert.ok(address && typeof address !== "string")
+  return { url: `http://127.0.0.1:${address.port}`, authorizeBodies }
+}
+
+test("non-object arguments are refused, never approved as {} and forwarded as sent", async (t) => {
+  // Review repro (platform-mcp F2): `arguments: ["production"]` used to be approved as `{}` — the
+  // human saw "drop_database with {}" — while the ORIGINAL message, array included, went to the
+  // target on approval. Now the call is refused before any approval is raised.
+  const gateway = await approvingGateway(t)
+  const cases = [["production"], "production", 42, null, false]
+  const out = await runProxy(
+    cases.map((a, i) => rpc("tools/call", { name: "drop_database", arguments: a }, i + 1)),
+    { policy: policyFile([{ action: "drop_database", effect: "allow" }]), gatewayUrl: gateway.url },
+  )
+  assert.doesNotMatch(out, /"method":"tools\/call"/, `a non-object arguments call reached the target: ${out}`)
+  assert.equal([...out.matchAll(/"code":-32602/g)].length, cases.length, out)
+  for (let id = 1; id <= cases.length; id++) assert.match(out, new RegExp(`"id":${id}\\b`))
+  assert.deepEqual(
+    gateway.authorizeBodies,
+    [],
+    "no approval may be raised for a call the gate cannot describe",
+  )
+})
+
+test("a tools/call without a string name is refused", async (t) => {
+  const gateway = await approvingGateway(t)
+  const out = await runProxy(
+    [rpc("tools/call", { name: ["drop_database"], arguments: {} }, 1), rpc("tools/call", undefined, 2)],
+    { policy: policyFile([{ action: "", effect: "allow" }]), gatewayUrl: gateway.url },
+  )
+  assert.doesNotMatch(out, /"method":"tools\/call"/)
+  assert.equal([...out.matchAll(/"code":-32602/g)].length, 2, out)
+  assert.deepEqual(gateway.authorizeBodies, [])
+})
+
+test("an approved call is forwarded rebuilt from exactly the approved name and arguments", async (t) => {
+  const gateway = await approvingGateway(t)
+  const sent = {
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    smuggled: "top-level",
+    params: {
+      name: "transfer",
+      arguments: { amount: 10, to: "acct-1", nested: { memo: "rent" } },
+      _meta: { progressToken: "p-1", "vendor/override": { amount: 1_000_000 } },
+      task: { ttl: 60_000 },
+    },
+  }
+  const out = await runProxy([JSON.stringify(sent)], {
+    policy: policyFile([{ action: "transfer", effect: "allow" }]),
+    gatewayUrl: gateway.url,
+    quietMs: 2_500, // the production approval poll is 2s
+  })
+  const forwarded = out
+    .split("\n")
+    .filter((l) => l.includes('"method":"tools/call"'))
+    .map((l) => JSON.parse(l) as unknown)
+  assert.equal(forwarded.length, 1, out)
+  assert.deepEqual(forwarded[0], {
+    jsonrpc: "2.0",
+    id: 7,
+    method: "tools/call",
+    params: {
+      name: "transfer",
+      arguments: { amount: 10, to: "acct-1", nested: { memo: "rent" } },
+      _meta: { progressToken: "p-1" },
+    },
+  })
+  // And what reached the target is what the gateway was asked to approve.
+  assert.equal(gateway.authorizeBodies.length, 1)
+  const approved = gateway.authorizeBodies[0] as { params: unknown }
+  assert.deepEqual(approved.params, sent.params.arguments)
+})
+
+test("omitted arguments execute as the approved empty object and invalid progress metadata is dropped", async (t) => {
+  const gateway = await approvingGateway(t)
+  const calls = [
+    rpc("tools/call", { name: "refresh" }, 1),
+    rpc("tools/call", { name: "refresh", _meta: { progressToken: { override: true } } }, 2),
+    rpc("tools/call", { name: "refresh", arguments: {}, _meta: { progressToken: 0 } }, 3),
+  ]
+  const out = await runProxy(calls, { gatewayUrl: gateway.url, quietMs: 2_500 })
+  const forwarded = out
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as unknown)
+  assert.deepEqual(forwarded, [
+    { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "refresh", arguments: {} } },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "refresh", arguments: {} } },
+    {
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "refresh", arguments: {}, _meta: { progressToken: 0 } },
+    },
+  ])
+  assert.equal(gateway.authorizeBodies.length, 3)
+  for (const approved of gateway.authorizeBodies) {
+    assert.deepEqual((approved as { params: unknown }).params, {})
+  }
+})
+
+test("a plain-http, non-loopback --gateway-url is refused at startup", async () => {
+  // Unlike runProxy's children (SIGKILLed, so they never write coverage), this one exits normally.
+  // Point NODE_V8_COVERAGE at a throwaway directory so its partial run is not merged into this
+  // package's coverage gate. Deleting the variable is not enough: Node re-adds it to every child's
+  // environment while coverage is on.
+  const coverageSink = fs.mkdtempSync(path.join(tmp, "coverage-sink-"))
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", CLI, "--target-command", "cat", "--gateway-url", "http://gw.example"],
+    { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, NODE_V8_COVERAGE: coverageSink } },
+  )
+  let stderr = ""
+  child.stderr.on("data", (d: Buffer) => {
+    stderr += d.toString()
+  })
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.on("error", reject)
+    child.on("close", resolve)
+  })
+  assert.equal(code, 1)
+  assert.match(stderr, /--gateway-url \/ INTYGA_GATEWAY_URL must use https:\/\//)
+})
