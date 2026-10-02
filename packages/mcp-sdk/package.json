@@ -1,7 +1,7 @@
 {
   "name": "@intyga/mcp-sdk",
   "version": "1.0.0",
-  "description": "Wrap an MCP server so every tool call is gated behind a cryptographically-signed human approval (local policy + Intyga gateway step-up).",
+  "description": "Wrap an MCP server so every tool call is gated behind a cryptographically-signed human approval (local policy + INTYGA gateway step-up).",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -39,7 +39,7 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "rm -rf dist && tsc",
     "typecheck": "tsc --noEmit",
     "simulate": "tsx src/simulate.ts",
     "test": "tsx --test 'src/**/*.test.ts'",

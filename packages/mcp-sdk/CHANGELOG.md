@@ -5,6 +5,8 @@ All notable changes to `@intyga/mcp-sdk` are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.0.0]
+
 - **Security (L21, I11):** the approval client never follows a redirect (a followed 307 re-sent
   the token request and the approval request to another origin); every gateway request uses
   `redirect: "manual"` and a 30 s timeout, a 3xx is reported as an error, and a redirect on the
@@ -25,10 +27,9 @@ All notable changes to `@intyga/mcp-sdk` are documented here. The format follows
   failures and aborting the wait. A second 401 after that is an ordinary failure.
 - Package made publishable (`private` removed) with registry metadata and this changelog.
 
-## [1.0.0]
 
 - `intygafyServer(server, config)` — wraps both `server.tool` and `server.registerTool`, and
   re-gates `update({ callback })` replacements (including under a same-call rename).
 - Fail-closed local policy evaluation (`evaluatePolicy`), Zod-validated at the boundary; shared
   with `@intyga/mcp-proxy` so both enforcement paths reach identical verdicts.
-- `requestApproval` — challenge + poll to a terminal outcome against the Intyga gateway.
+- `requestApproval` — challenge + poll to a terminal outcome against the INTYGA gateway.

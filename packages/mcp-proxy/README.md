@@ -2,7 +2,7 @@
 
 A stdio proxy that sits between an MCP client (the agent) and a third-party MCP server. Every
 `tools/call` is checked against your local policy; a `deny` is refused locally and every other
-result goes through your Intyga gateway's authorization flow. AI-agent execution also requires a
+result goes through your INTYGA gateway's authorization flow. AI-agent execution also requires a
 v1 receipt and RP check of the human approval.
 The wrapped server is not modified and is deliberately not trusted.
 
@@ -29,7 +29,7 @@ proxy spawns the real server as a child and mediates the protocol stream.
 
 | Flag | Env var | Meaning |
 | :--- | :--- | :--- |
-| `--gateway-url` | `INTYGA_GATEWAY_URL` | Intyga gateway (default `http://localhost:8787`). Must be `https://`; plain `http://` is refused at startup except to a loopback host (`localhost`, `127.0.0.0/8`, `::1`) |
+| `--gateway-url` | `INTYGA_GATEWAY_URL` | INTYGA gateway (default `http://localhost:8787`). Must be `https://`; plain `http://` is refused at startup except to a loopback host (`localhost`, `127.0.0.0/8`, `::1`) |
 | `--client-id` | `INTYGA_CLIENT_ID` | Agent credential id |
 | `--client-secret` | `INTYGA_CLIENT_SECRET` | **Use the env var.** The flag is accepted but warns: argv is world-readable via `ps`, including by the wrapped server — the one process this proxy exists to distrust |
 | `--agent-id` | `INTYGA_AGENT_ID` | Default value for `--target` when that is unset. Never sent to the gateway — the identity the ledger records as requester comes from the `--client-id` credential exchange |
@@ -66,7 +66,7 @@ proxy spawns the real server as a child and mediates the protocol stream.
   without its v1 context. `reserve` must use a durable compare-and-swap
   transaction and enforce the budget across sessions. The proxy does not provide a database or a
   trustworthy view of the agent's actual model, tools or prompt; your RP module must provide both.
-- **The wrapped server never sees your Intyga credentials.** Every `INTYGA_*` variable is stripped
+- **The wrapped server never sees your INTYGA credentials.** Every `INTYGA_*` variable is stripped
   from the child's environment; everything else passes through. Run untrusted third-party servers
   under a separate OS identity or sandbox so they cannot read the RP module's state, files or parent
   process. Environment filtering alone is not an OS security boundary.

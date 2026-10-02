@@ -136,3 +136,9 @@ gateway request follows a redirect.
 ## License
 
 Apache-2.0 — see [`LICENSE`](./LICENSE).
+
+### TypeScript library types
+
+The upstream `@modelcontextprotocol/sdk` exposes `HeadersInit` in its transport declarations. Include
+`"DOM"` alongside your ECMAScript library in `tsconfig.json` (for example,
+`"lib": ["ES2022", "DOM"]`), including for Node-only consumers of this wrapper.

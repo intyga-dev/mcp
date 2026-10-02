@@ -5,6 +5,8 @@ All notable changes to `@intyga/mcp-proxy` are documented here. The format follo
 
 ## [Unreleased]
 
+## [1.0.0]
+
 - **Security (I11):** a non-`https://` `--gateway-url` / `INTYGA_GATEWAY_URL` is refused at startup,
   before the target server is spawned, except loopback hosts (`localhost`, `127.0.0.0/8`, `::1`).
   Gateway requests no longer follow redirects (via `@intyga/mcp-sdk`).
@@ -27,7 +29,6 @@ All notable changes to `@intyga/mcp-proxy` are documented here. The format follo
   atomic nonce/session/budget reservation. Local `allow` never forwards a tool without approval.
 - Package made publishable (`private` removed) with registry metadata and this changelog.
 
-## [1.0.0]
 
 - Stdio proxy gating a third-party MCP server's `tools/call` traffic behind local policy +
   human approval, with no changes to the wrapped server.
