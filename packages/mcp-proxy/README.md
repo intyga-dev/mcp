@@ -1,5 +1,7 @@
 # @intyga/mcp-proxy — human approval in front of any MCP server, no code changes
 
+[![Release gated by INTYGA](https://www.intyga.com/badges/release-gated-by-intyga.svg)](https://www.intyga.com/use-cases/package-publishing)
+
 A stdio proxy that sits between an MCP client (the agent) and a third-party MCP server. Every
 `tools/call` is checked against your local policy; a `deny` is refused locally and every other
 result goes through your INTYGA gateway's authorization flow. AI-agent execution also requires a

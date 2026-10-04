@@ -1,5 +1,7 @@
 # @intyga/mcp-sdk — gate an MCP server's tools behind a human approval
 
+[![Release gated by INTYGA](https://www.intyga.com/badges/release-gated-by-intyga.svg)](https://www.intyga.com/use-cases/package-publishing)
+
 Middleware for [Model Context Protocol](https://modelcontextprotocol.io) servers: wrap your
 `McpServer` once, and every tool it registers executes only after gateway authorization. For
 AI-agent calls, the v1 receipt and RP execution check bind the human approval to the action.
