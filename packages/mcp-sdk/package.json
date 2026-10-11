@@ -1,6 +1,6 @@
 {
   "name": "@intyga/mcp-sdk",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Wrap an MCP server so every tool call is gated behind a cryptographically-signed human approval (local policy + INTYGA gateway step-up).",
   "license": "Apache-2.0",
   "repository": {
@@ -47,13 +47,13 @@
   },
   "dependencies": {
     "@intyga/sdk": "workspace:^",
-    "@modelcontextprotocol/sdk": "^1.31.0",
-    "zod": "^4.5.2"
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@intyga/config": "workspace:*",
-    "@types/node": "^26.4.0",
-    "tsx": "4.23.12",
+    "@types/node": "^26.6.4",
+    "tsx": "4.23.15",
     "typescript": "^5.9.3"
   }
 }

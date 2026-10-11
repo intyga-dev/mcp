@@ -5,6 +5,12 @@ All notable changes to `@intyga/mcp-sdk` are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.0.0]
+
+- **Breaking dependency upgrade:** use `@intyga/sdk` 2.x for tenant-bound DIV v2 approvals.
+  Existing installations must upgrade before the gateway v2 cutover. The wrapper continues to
+  require human approval for every allowed tool call.
+
 ## [1.0.0]
 
 - **Security (L21, I11):** the approval client never follows a redirect (a followed 307 re-sent

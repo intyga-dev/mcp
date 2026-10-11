@@ -5,6 +5,11 @@ All notable changes to `@intyga/mcp-proxy` are documented here. The format follo
 
 ## [Unreleased]
 
+## [2.0.0]
+
+- **Breaking dependency upgrade:** bundle `@intyga/mcp-sdk` 2.x and the matched tenant-bound
+  2.0.0 SDK/verifier. Upgrade deployed proxies before the gateway v2 cutover.
+
 ## [1.0.0]
 
 - **Security (I11):** a non-`https://` `--gateway-url` / `INTYGA_GATEWAY_URL` is refused at startup,
