@@ -5,6 +5,12 @@ All notable changes to `@intyga/mcp-proxy` are documented here. The format follo
 
 ## [Unreleased]
 
+## [2.1.0]
+
+- Depends on `@intyga/mcp-sdk` ^2.1.0, which adds DEWP 1.1 dispatch reporting for approved tool
+  calls. No proxy code changes; the version moves because a published tarball is immutable and the
+  packed dependency range differs from 2.0.0.
+
 ## [2.0.0]
 
 - **Breaking dependency upgrade:** bundle `@intyga/mcp-sdk` 2.x and the matched tenant-bound
