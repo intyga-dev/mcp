@@ -126,7 +126,9 @@ function refuseRedirect(res: Response, op: string): void {
   if (isRedirect(res)) throw new RedirectRefused(`${op} failed (status ${res.status}): ${redirectHint(res)}`)
 }
 
-async function getToken(req: ApprovalRequest): Promise<string> {
+async function getToken(
+  req: Pick<ApprovalRequest, "gatewayUrl" | "clientId" | "clientSecret">,
+): Promise<string> {
   const basic = Buffer.from(`${req.clientId}:${req.clientSecret}`).toString("base64")
   const res = await gatewayFetch(`${req.gatewayUrl}/oauth/token`, {
     method: "POST",
@@ -262,6 +264,31 @@ async function consume(req: ApprovalRequest, token: string, nonce: string): Prom
   const body = (await res.json().catch(() => ({}))) as { ok?: boolean; reason?: string }
   if (body.ok !== true) {
     throw new Error(`Approval could not be consumed: ${body.reason ?? "gateway refused the redemption"}`)
+  }
+}
+
+/**
+ * DEWP §4.7: report that an approved, consumed action was dispatched, opening its evidence window.
+ * Best effort and never throws: execution evidence is an after-the-fact record, so a failed report
+ * leaves the approval as it was and surfaces only as missing evidence. Returns whether it was recorded.
+ */
+export async function reportDispatched(
+  req: Pick<ApprovalRequest, "gatewayUrl" | "clientId" | "clientSecret">,
+  nonce: string,
+  evidenceWithinSeconds: number,
+): Promise<boolean> {
+  try {
+    const token = await getToken(req)
+    const res = await gatewayFetch(`${req.gatewayUrl}/authorize/${encodeURIComponent(nonce)}/dispatched`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ evidenceWithinSeconds }),
+    })
+    if (!res.ok) return false
+    const body = (await res.json().catch(() => ({}))) as { ok?: boolean }
+    return body.ok === true
+  } catch {
+    return false
   }
 }
 

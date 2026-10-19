@@ -463,3 +463,67 @@ test("intygafyServer refuses a plain-http, non-loopback gateway at wiring time",
     intygafyServer(fakeServer().server as never, { ...CONFIG, gatewayUrl: "http://localhost:8787" } as never),
   )
 })
+
+test("reportDispatch reports the dispatch after the approved handler runs, even if it throws", async () => {
+  const originalFetch = globalThis.fetch
+  const calls: { url: string; body: unknown }[] = []
+  const reply = (body: unknown) => ({ ok: true, status: 200, json: async () => body }) as unknown as Response
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    const u = String(url)
+    let body: unknown
+    try {
+      body = init?.body ? JSON.parse(String(init.body)) : undefined
+    } catch {
+      body = String(init?.body)
+    }
+    calls.push({ url: u, body })
+    if (u.endsWith("/oauth/token")) return reply({ access_token: "tok" })
+    if (u.endsWith("/authorize")) return reply({ nonce: "n-1", status: "PENDING" })
+    if (u.endsWith("/authorize/verify")) return reply({ ok: true })
+    if (u.endsWith("/dispatched")) return reply({ ok: true })
+    if (u.includes("/authorize/")) return reply({ status: "APPROVED" })
+    return reply({ ok: true })
+  }) as typeof fetch
+  try {
+    const order: string[] = []
+    const { secured } = wrapHandler({ reportDispatch: { evidenceWithinSeconds: 120 } }, async () => {
+      order.push(`handler after ${calls.length} calls`)
+      return "executed"
+    })
+    assert.equal(await secured({ amount: 1 }, {}), "executed")
+    const dispatched = calls.find((c) => c.url.endsWith("/authorize/n-1/dispatched"))
+    assert.ok(dispatched, "dispatch was not reported")
+    assert.deepEqual(dispatched.body, { evidenceWithinSeconds: 120 })
+    assert.ok(calls.indexOf(dispatched) > calls.findIndex((c) => c.url.endsWith("/authorize/verify")))
+
+    calls.length = 0
+    const { secured: failing } = wrapHandler({ reportDispatch: { evidenceWithinSeconds: 60 } }, async () => {
+      throw new Error("device timeout")
+    })
+    await assert.rejects(() => failing({ amount: 1 }, {}) as Promise<unknown>, /device timeout/)
+    assert.ok(calls.some((c) => c.url.endsWith("/dispatched")))
+
+    // Without the option nothing is reported.
+    calls.length = 0
+    const { secured: plain } = wrapHandler({}, async () => "executed")
+    await plain({ amount: 1 }, {})
+    assert.ok(!calls.some((c) => c.url.endsWith("/dispatched")))
+
+    // A failed report never changes the tool result.
+    globalThis.fetch = (async (url: unknown) => {
+      const u = String(url)
+      if (u.endsWith("/oauth/token")) return reply({ access_token: "tok" })
+      if (u.endsWith("/authorize")) return reply({ nonce: "n-1", status: "PENDING" })
+      if (u.endsWith("/authorize/verify")) return reply({ ok: true })
+      if (u.endsWith("/dispatched")) throw new Error("network down")
+      return reply({ status: "APPROVED" })
+    }) as typeof fetch
+    const { secured: offline } = wrapHandler(
+      { reportDispatch: { evidenceWithinSeconds: 60 } },
+      async () => "executed",
+    )
+    assert.equal(await offline({ amount: 1 }, {}), "executed")
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})

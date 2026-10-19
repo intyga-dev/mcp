@@ -5,6 +5,12 @@ All notable changes to `@intyga/mcp-sdk` are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.1.0]
+
+- `IntygaConfig.reportDispatch: { evidenceWithinSeconds }` reports the dispatch of an approved tool
+  call after it runs (DEWP 1.1 §4.7 execution evidence), best effort and even when the handler throws.
+  New export `reportDispatched`.
+
 ## [2.0.0]
 
 - **Breaking dependency upgrade:** use `@intyga/sdk` 2.x for tenant-bound DIV v2 approvals.

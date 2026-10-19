@@ -1,9 +1,9 @@
 import { assertGatewayUrl } from "@intyga/sdk"
-import { requestApproval } from "./approval-client.js"
+import { reportDispatched, requestApproval } from "./approval-client.js"
 import { evaluatePolicy } from "./policy.js"
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 
-export { requestApproval } from "./approval-client.js"
+export { reportDispatched, requestApproval } from "./approval-client.js"
 // The gateway-URL rule every Intyga client applies (https://, loopback http for local development),
 // re-exported so the stdio proxy can refuse a bad URL at startup rather than on the first tool call.
 export { assertGatewayUrl } from "@intyga/sdk"
@@ -34,6 +34,12 @@ export interface IntygaConfig {
   intervalMs?: number
   /** RP-owned v1 PEP. Required when clientId identifies an AI_AGENT. */
   agentV1?: import("./approval-client.js").AgentV1Runtime
+  /**
+   * DEWP §4.7 execution evidence: after an approved tool call runs, report the dispatch so a
+   * registered evidence source has `evidenceWithinSeconds` to confirm it took effect. Best effort —
+   * the tool result is returned either way. Unset: no dispatch is reported.
+   */
+  reportDispatch?: { evidenceWithinSeconds: number }
 }
 
 type ToolHandler = (handlerArgs: Record<string, unknown>, extra: unknown) => Promise<unknown>
@@ -101,7 +107,14 @@ export function intygafyServer(server: McpServer, config: IntygaConfig) {
       })
 
       if (outcome.outcome === "approved") {
-        return originalHandler(boundArgs, extra)
+        try {
+          return await originalHandler(boundArgs, extra)
+        } finally {
+          // A handler that threw may still have sent the command, so the dispatch is reported either
+          // way; the evidence source, not this process, says whether it took effect.
+          if (config.reportDispatch)
+            await reportDispatched(config, outcome.nonce, config.reportDispatch.evidenceWithinSeconds)
+        }
       } else if (outcome.outcome === "refused") {
         return {
           content: [
