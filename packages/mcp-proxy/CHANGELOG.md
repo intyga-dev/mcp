@@ -3,7 +3,21 @@
 All notable changes to `@intyga/mcp-proxy` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [3.1.0]
+
+- Trust modules may supply `enrolledDeviceKeys` and a `requireEnrolledDevice` floor
+  (`@intyga/mcp-sdk` 3.1.0, DIV §4.3.2).
+
+## [3.0.0]
+
+- Reject unsupported requirement-floor fields and malformed self-certifying approver DIDs at
+  startup instead of silently weakening the configured execution policy.
+
+- **Breaking:** require exactly one validated RP trust module. SERVICE/human calls use
+  `--execution-trust-module`; AI_AGENT modules now require tenant and requirement-floor inputs.
+- Verify receipts before redemption and refuse automatic unsigned approvals before forwarding.
+- Shutdown now aborts in-flight and queued approvals before redemption/forwarding, terminates the
+  wrapped server with a bounded hard deadline, and preserves split UTF-8 child output correctly.
 
 ## [2.1.0]
 

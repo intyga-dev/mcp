@@ -1,13 +1,23 @@
 import { assertGatewayUrl } from "@intyga/sdk"
-import { reportDispatched, requestApproval } from "./approval-client.js"
+import {
+  assertAgentV1Runtime,
+  assertExecutionTrust,
+  reportDispatched,
+  requestApproval,
+} from "./approval-client.js"
 import { evaluatePolicy } from "./policy.js"
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 
-export { reportDispatched, requestApproval } from "./approval-client.js"
+export {
+  assertAgentV1Runtime,
+  assertExecutionTrust,
+  reportDispatched,
+  requestApproval,
+} from "./approval-client.js"
 // The gateway-URL rule every Intyga client applies (https://, loopback http for local development),
 // re-exported so the stdio proxy can refuse a bad URL at startup rather than on the first tool call.
 export { assertGatewayUrl } from "@intyga/sdk"
-export type { AgentV1Runtime, ApprovalOutcome, ApprovalRequest } from "./approval-client.js"
+export type { AgentV1Runtime, ApprovalOutcome, ApprovalRequest, ExecutionTrust } from "./approval-client.js"
 export { evaluatePolicy } from "./policy.js"
 export type { PolicyContext, PolicyDecision, PolicyManifest, PolicyRule } from "./policy.js"
 
@@ -34,6 +44,8 @@ export interface IntygaConfig {
   intervalMs?: number
   /** RP-owned v1 PEP. Required when clientId identifies an AI_AGENT. */
   agentV1?: import("./approval-client.js").AgentV1Runtime
+  /** RP-owned receipt trust for SERVICE/human credentials. Mutually exclusive with `agentV1`. */
+  executionTrust?: import("./approval-client.js").ExecutionTrust
   /**
    * DEWP §4.7 execution evidence: after an approved tool call runs, report the dispatch so a
    * registered evidence source has `evidenceWithinSeconds` to confirm it took effect. Best effort —
@@ -42,7 +54,35 @@ export interface IntygaConfig {
   reportDispatch?: { evidenceWithinSeconds: number }
 }
 
-type ToolHandler = (handlerArgs: Record<string, unknown>, extra: unknown) => Promise<unknown>
+type ToolHandler = (...args: unknown[]) => unknown
+type RegisteredTool = {
+  inputSchema?: unknown
+  handler: unknown
+  update: (updates: Record<string, unknown>) => unknown
+}
+type McpServerInternals = {
+  _registeredTools?: Record<string, RegisteredTool>
+  _createRegisteredTool?: (...args: unknown[]) => RegisteredTool
+}
+
+function sanitizedExtra(extra: unknown): unknown {
+  if (typeof extra !== "object" || extra === null || Array.isArray(extra)) return extra
+  const source = extra as Record<string, unknown>
+  const meta = source._meta
+  if (typeof meta !== "object" || meta === null || Array.isArray(meta)) {
+    const { _meta: _dropped, ...rest } = source
+    return rest
+  }
+  const progressToken = (meta as Record<string, unknown>).progressToken
+  const { _meta: _dropped, ...rest } = source
+  return {
+    ...rest,
+    ...((typeof progressToken === "string" ||
+      (typeof progressToken === "number" && Number.isFinite(progressToken))) && {
+      _meta: { progressToken },
+    }),
+  }
+}
 
 /**
  * Put every tool this server registers behind the Intyga gate.
@@ -61,124 +101,176 @@ export function intygafyServer(server: McpServer, config: IntygaConfig) {
   // Fail at wiring time, not on the first tool call: a plain-http gateway would carry the client
   // secret and every approval request in the clear.
   assertGatewayUrl(config.gatewayUrl)
-  const gate =
-    (name: string, originalHandler: ToolHandler): ToolHandler =>
-    async (handlerArgs: Record<string, unknown>, extra: unknown): Promise<unknown> => {
-      // Bind the bytes sent for approval to the args handed to the tool. MCP arguments are JSON;
-      // snapshot them before any await so another task cannot mutate the caller's object while a
-      // human is deciding. A non-JSON value is refused rather than guessed into a signed action.
-      let boundArgs: Record<string, unknown>
-      try {
-        const raw = JSON.stringify(handlerArgs)
-        const parsed: unknown = JSON.parse(raw)
-        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
-          throw new Error("tool arguments must be a JSON object")
-        boundArgs = parsed as Record<string, unknown>
-      } catch {
-        return { content: [{ type: "text", text: "Intyga Gateway Error: tool arguments are not JSON" }] }
+  if ((config.agentV1 === undefined) === (config.executionTrust === undefined))
+    throw new Error("INTYGA MCP execution requires exactly one of agentV1 or executionTrust")
+  if (config.agentV1) assertAgentV1Runtime(config.agentV1)
+  else assertExecutionTrust(config.executionTrust, "executionTrust")
+  const internals = server as unknown as McpServerInternals
+  if (
+    Object.getPrototypeOf(server) !== McpServer.prototype ||
+    server.constructor !== McpServer ||
+    typeof internals._createRegisteredTool !== "function" ||
+    !internals._registeredTools ||
+    typeof internals._registeredTools !== "object"
+  )
+    throw new Error(
+      "Unsupported @modelcontextprotocol/sdk McpServer internals; @intyga/mcp-sdk supports exactly 1.32.1 and refused to leave tools ungated",
+    )
+
+  const gatedHandlers = new WeakSet<object>()
+  const runGate = async (
+    name: string,
+    handlerArgs: Record<string, unknown>,
+    invoke: (boundArgs: Record<string, unknown>) => Promise<unknown>,
+  ): Promise<unknown> => {
+    // Bind the bytes sent for approval to the args handed to the tool. MCP arguments are JSON;
+    // snapshot them before any await so another task cannot mutate the caller's object while a
+    // human is deciding. A non-JSON value is refused rather than guessed into a signed action.
+    let boundArgs: Record<string, unknown>
+    try {
+      const raw = JSON.stringify(handlerArgs)
+      const parsed: unknown = JSON.parse(raw)
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+        throw new Error("tool arguments must be a JSON object")
+      boundArgs = parsed as Record<string, unknown>
+    } catch {
+      return {
+        content: [{ type: "text", text: "INTYGA Gateway Error: tool arguments are not JSON" }],
+        isError: true,
       }
-      // 1. Evaluate policy (local-first check)
-      const decision = evaluatePolicy(name, boundArgs, config)
+    }
+    // 1. Evaluate policy (local-first check)
+    const decision = evaluatePolicy(name, boundArgs, config)
 
-      // If the policy denies, block the action immediately
-      if (decision === "deny") {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Security Violation: Action '${name}' is denied by Intyga policy.`,
-            },
-          ],
-        }
-      }
-
-      // Otherwise, request human approval (biometric step-up) via Intyga Gateway API
-      const outcome = await requestApproval({
-        gatewayUrl: config.gatewayUrl,
-        clientId: config.clientId,
-        clientSecret: config.clientSecret,
-        target: config.target ?? config.agentId,
-        actionType: name,
-        params: boundArgs,
-        actionDescription: `Authorize action '${name}' with parameters: ${JSON.stringify(boundArgs)}`,
-        timeoutMs: config.timeoutMs,
-        intervalMs: config.intervalMs,
-        agentV1: config.agentV1,
-      })
-
-      if (outcome.outcome === "approved") {
-        try {
-          return await originalHandler(boundArgs, extra)
-        } finally {
-          // A handler that threw may still have sent the command, so the dispatch is reported either
-          // way; the evidence source, not this process, says whether it took effect.
-          if (config.reportDispatch)
-            await reportDispatched(config, outcome.nonce, config.reportDispatch.evidenceWithinSeconds)
-        }
-      } else if (outcome.outcome === "refused") {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Intyga Gateway Security Check Refused: ${outcome.reason}`,
-            },
-          ],
-        }
-      } else {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Intyga Gateway Error: ${outcome.reason}`,
-            },
-          ],
-        }
+    // If the policy denies, block the action immediately
+    if (decision === "deny") {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Security Violation: Action '${name}' is denied by Intyga policy.`,
+          },
+        ],
       }
     }
 
-  /** Swap the handler argument of a registration call for a gated one. */
-  const gateArgs = (args: unknown[]): unknown[] => {
-    const handlerIndex = args.findIndex((arg) => typeof arg === "function")
-    if (handlerIndex === -1) return args
-    const name = typeof args[0] === "string" ? args[0] : ""
-    const next = [...args]
-    next[handlerIndex] = gate(name, args[handlerIndex] as ToolHandler)
-    return next
+    // Otherwise, request human approval (biometric step-up) via Intyga Gateway API
+    const outcome = await requestApproval({
+      gatewayUrl: config.gatewayUrl,
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      target: config.target ?? config.agentId,
+      actionType: name,
+      params: boundArgs,
+      actionDescription: `Authorize action '${name}' with parameters: ${JSON.stringify(boundArgs)}`,
+      timeoutMs: config.timeoutMs,
+      intervalMs: config.intervalMs,
+      agentV1: config.agentV1,
+      executionTrust: config.executionTrust,
+    })
+
+    if (outcome.outcome === "approved") {
+      try {
+        return await invoke(boundArgs)
+      } finally {
+        // A handler that threw may still have sent the command, so the dispatch is reported either
+        // way; the evidence source, not this process, says whether it took effect.
+        if (config.reportDispatch)
+          await reportDispatched(config, outcome.nonce, config.reportDispatch.evidenceWithinSeconds)
+      }
+    } else if (outcome.outcome === "refused") {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Intyga Gateway Security Check Refused: ${outcome.reason}`,
+          },
+        ],
+      }
+    } else {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Intyga Gateway Error: ${outcome.reason}`,
+          },
+        ],
+      }
+    }
   }
 
-  /**
-   * Patch the returned handle so `update({ callback })` re-gates the replacement. Without this, one
-   * `update` call after registration hands back an ungated tool.
-   */
-  const gateUpdates = (name: string, registered: unknown): unknown => {
-    if (typeof registered !== "object" || registered === null) return registered
-    const handle = registered as { update?: (updates: Record<string, unknown>) => unknown }
-    if (typeof handle.update !== "function") return registered
-    const originalUpdate = handle.update.bind(handle)
-    handle.update = (updates: Record<string, unknown>) => {
-      if (typeof updates?.callback !== "function") return originalUpdate(updates)
-      // A rename in the same call changes which policy rule applies, so gate against the new name.
-      const gatedName = typeof updates.name === "string" ? updates.name : name
-      return originalUpdate({ ...updates, callback: gate(gatedName, updates.callback as ToolHandler) })
+  const gateHandler = (nameRef: { current: string }, original: unknown, hasInput: boolean): unknown => {
+    if (typeof original !== "function" && (typeof original !== "object" || original === null))
+      throw new Error(`Unsupported handler for MCP tool '${nameRef.current}'; refusing registration`)
+    if (typeof original === "object" && gatedHandlers.has(original)) return original
+    if (typeof original === "function") {
+      if (gatedHandlers.has(original)) return original
+      const wrapped: ToolHandler = hasInput
+        ? async (args, extra) =>
+            runGate(nameRef.current, args as Record<string, unknown>, (bound) =>
+              Promise.resolve((original as ToolHandler)(bound, sanitizedExtra(extra))),
+            )
+        : async (extra) =>
+            runGate(nameRef.current, {}, () =>
+              Promise.resolve((original as ToolHandler)(sanitizedExtra(extra))),
+            )
+      gatedHandlers.add(wrapped)
+      return wrapped
+    }
+    const task = original as { createTask?: ToolHandler }
+    if (typeof task.createTask !== "function")
+      throw new Error(`Unsupported handler object for MCP tool '${nameRef.current}'; refusing registration`)
+    const createTask = task.createTask.bind(task)
+    const wrapped = new Proxy(task, {
+      get(target, property, receiver) {
+        if (property !== "createTask") return Reflect.get(target, property, receiver)
+        return hasInput
+          ? async (args: unknown, extra: unknown) =>
+              runGate(nameRef.current, args as Record<string, unknown>, (bound) =>
+                Promise.resolve(createTask(bound, sanitizedExtra(extra))),
+              )
+          : async (extra: unknown) =>
+              runGate(nameRef.current, {}, () => Promise.resolve(createTask(sanitizedExtra(extra))))
+      },
+    })
+    gatedHandlers.add(wrapped)
+    return wrapped
+  }
+
+  const secureRegistered = (registered: RegisteredTool, initialName: string): RegisteredTool => {
+    const nameRef = { current: initialName }
+    let rawHandler = registered.handler
+    let hasInput = registered.inputSchema !== undefined
+    registered.handler = gateHandler(nameRef, rawHandler, hasInput)
+    const originalUpdate = registered.update.bind(registered)
+    registered.update = (updates) => {
+      const nextName = typeof updates.name === "string" ? updates.name : nameRef.current
+      if (updates.callback !== undefined) rawHandler = updates.callback
+      if (updates.paramsSchema !== undefined) hasInput = true
+      const handlerChanged = updates.callback !== undefined || updates.paramsSchema !== undefined
+      const next = !handlerChanged
+        ? updates
+        : {
+            ...updates,
+            callback: gateHandler(nameRef, rawHandler, hasInput),
+          }
+      const result = originalUpdate(next)
+      nameRef.current = nextName
+      return result
     }
     return registered
   }
 
-  const originalTool = server.tool.bind(server)
-  server.tool = ((...args: unknown[]) =>
-    gateUpdates(
-      typeof args[0] === "string" ? args[0] : "",
-      (originalTool as (...a: unknown[]) => unknown)(...gateArgs(args)),
-    )) as unknown as typeof originalTool
+  // Secure tools registered before wrapping, then intercept the one creation primitive used by
+  // tool(), registerTool() and experimental.tasks.registerToolTask() in MCP SDK 1.32.1.
+  for (const [name, registered] of Object.entries(internals._registeredTools))
+    secureRegistered(registered, name)
+  const originalCreate = internals._createRegisteredTool.bind(server)
+  internals._createRegisteredTool = ((...args: unknown[]) => {
+    const name = typeof args[0] === "string" ? args[0] : ""
+    const registered = originalCreate(...args)
+    return secureRegistered(registered, name)
+  }) as typeof internals._createRegisteredTool
 
-  // Guarded: `registerTool` arrived in a later @modelcontextprotocol/sdk than `tool`, so a server
-  // that predates it (or a test double) simply has nothing to patch here.
-  if (typeof server.registerTool === "function") {
-    const originalRegisterTool = server.registerTool.bind(server)
-    server.registerTool = ((...args: unknown[]) =>
-      gateUpdates(
-        typeof args[0] === "string" ? args[0] : "",
-        (originalRegisterTool as (...a: unknown[]) => unknown)(...gateArgs(args)),
-      )) as unknown as typeof originalRegisterTool
-  }
+  return server
 }

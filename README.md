@@ -69,6 +69,7 @@ npm install @intyga/mcp-sdk
 ```typescript
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { intygafyServer } from "@intyga/mcp-sdk";
+import executionTrust from "./rp-execution-trust.js";
 import { z } from "zod";
 
 const server = new McpServer({ name: "my-secured-server", version: "1.0.0" });
@@ -80,6 +81,8 @@ intygafyServer(server, {
   clientId: process.env.INTYGA_CLIENT_ID!,
   clientSecret: process.env.INTYGA_CLIENT_SECRET!,
   agentId: process.env.INTYGA_AGENT_ID!,
+  // RP-owned tenant, requester DID, approver keys and ordinary requirement floor.
+  executionTrust,
   enforcement: "local-first",
 });
 

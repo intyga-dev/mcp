@@ -3,7 +3,26 @@
 All notable changes to `@intyga/mcp-sdk` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [3.1.0]
+
+- `executionTrust` and `agentV1` accept an optional RP-owned `enrolledDeviceKeys` (DIV §4.3.2,
+  ADR 027), passed to receipt verification, and the requirement floor admits
+  `requireEnrolledDevice`. Without the keys a receipt whose signed policy requires an enrolled
+  approver device is refused, as before.
+
+## [3.0.0]
+
+- **Breaking:** require RP-owned tenant, requester, approver trust, and requirement floor for every
+  execution (`agentV1` or `executionTrust`); verify before consume and refuse `AUTO_APPROVED`.
+- Pin MCP SDK 1.32.1 and gate its common registration primitive, including pre-registered, task,
+  replacement, and renamed tools. Unsupported runtime shapes fail closed during setup.
+- Snapshot parsed arguments, strip caller `_meta` except `progressToken`, and re-check receipt time
+  and live agent configuration synchronously after consume/reservation immediately before execution.
+- Reject unsupported requirement-floor fields and malformed self-certifying approver DIDs during
+  setup instead of accepting policy that the executable verifier cannot enforce.
+- `ApprovalRequest.signal` now cancels token exchange, challenge creation, polling sleep/status,
+  redemption, and final execution checks so a shutting-down relying party cannot consume or execute
+  a previously queued approval.
 
 ## [2.1.0]
 

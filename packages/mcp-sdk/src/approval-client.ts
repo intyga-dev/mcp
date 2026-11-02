@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { setTimeout as sleep } from "node:timers/promises"
 import {
   agentConfigDigest,
   assertGatewayUrl,
@@ -10,6 +11,9 @@ import {
   type AgentSessionState,
   type ApproverTrustAnchor,
   type LiveAgentConfig,
+  type RequirementFloor,
+  verifyApprovalReceipt,
+  validSignerExclusions,
 } from "@intyga/sdk"
 
 type AgentInput = {
@@ -20,8 +24,14 @@ type AgentInput = {
 
 /** RP-owned inputs and atomic state operations. None may be sourced from the MCP caller or receipt. */
 export interface AgentV1Runtime {
+  /** RP-owned tenant binding. Never derive this from the receipt. */
+  tenantId: string
   requesterDid: string
   approvers: ApproverTrustAnchor
+  /** The ordinary approval-rule floor this action must satisfy. */
+  requirement: RequirementFloor
+  /** RP-owned enrolled approver device keys (DIV §4.3.2), e.g. a trust-anchor file's enrolledDeviceKeys. */
+  enrolledDeviceKeys?: string[]
   verifier: NonNullable<Parameters<typeof verifyAgentForExecution>[4]>
   prepare(actionType: string, params: Record<string, unknown>): Promise<AgentInput>
   liveConfig(): Promise<LiveAgentConfig>
@@ -35,6 +45,105 @@ export interface AgentV1Runtime {
     next: AgentSessionState
     amount: AgentIntentContext["action"]["amount"]
   }): Promise<boolean>
+}
+
+/** RP-owned verification inputs for SERVICE and human credentials. */
+export interface ExecutionTrust {
+  tenantId: string
+  requesterDid: string
+  approvers: ApproverTrustAnchor
+  requirement: RequirementFloor
+  /**
+   * RP-owned enrolled approver device keys (DIV §4.3.2). Required for a receipt whose signed policy
+   * demands an enrolled device; a trust-anchor file's `enrolledDeviceKeys` is the usual source.
+   */
+  enrolledDeviceKeys?: string[]
+  verifier?: NonNullable<Parameters<typeof verifyApprovalReceipt>[2]>
+}
+
+export function assertExecutionTrust(
+  value: unknown,
+  label = "execution trust",
+): asserts value is ExecutionTrust {
+  if (!value || typeof value !== "object") throw new Error(`${label} must be an object`)
+  const trust = value as Record<string, unknown>
+  if (typeof trust.tenantId !== "string" || trust.tenantId.trim() === "")
+    throw new Error(`${label}.tenantId must be a non-empty RP-owned string`)
+  if (typeof trust.requesterDid !== "string" || trust.requesterDid.trim() === "")
+    throw new Error(`${label}.requesterDid must be a non-empty RP-owned string`)
+  const requirement = trust.requirement as Record<string, unknown> | undefined
+  if (
+    !requirement ||
+    !Number.isInteger(requirement.requiredApprovals) ||
+    Number(requirement.requiredApprovals) < 1 ||
+    Number(requirement.requiredApprovals) > 64
+  )
+    throw new Error(`${label}.requirement.requiredApprovals must be an integer from 1 to 64`)
+  if (
+    (requirement.requireHardwareKey !== undefined && typeof requirement.requireHardwareKey !== "boolean") ||
+    (requirement.requireEnrolledDevice !== undefined &&
+      typeof requirement.requireEnrolledDevice !== "boolean") ||
+    (requirement.requesterCannotApprove !== undefined &&
+      typeof requirement.requesterCannotApprove !== "boolean") ||
+    (requirement.excludedSignerDids !== undefined && !validSignerExclusions(requirement.excludedSignerDids))
+  )
+    throw new Error(`${label}.requirement contains invalid policy-floor fields`)
+  const supportedRequirementKeys = new Set([
+    "requiredApprovals",
+    "requireHardwareKey",
+    "requesterCannotApprove",
+    "excludedSignerDids",
+    "requireEnrolledDevice",
+  ])
+  const unsupportedRequirementKeys = Object.keys(requirement).filter(
+    (key) => !supportedRequirementKeys.has(key),
+  )
+  if (unsupportedRequirementKeys.length > 0)
+    throw new Error(
+      `${label}.requirement contains unsupported execution floor fields: ${unsupportedRequirementKeys.join(", ")}`,
+    )
+  if (
+    trust.enrolledDeviceKeys !== undefined &&
+    (!Array.isArray(trust.enrolledDeviceKeys) ||
+      !trust.enrolledDeviceKeys.every((k) => typeof k === "string" && k.length > 0))
+  )
+    throw new Error(`${label}.enrolledDeviceKeys must be an array of non-empty base64 keys`)
+  const approvers = trust.approvers as Record<string, unknown> | undefined
+  if (!approvers) throw new Error(`${label}.approvers must be an object`)
+  const publicKeys = approvers.publicKeys
+  const dids = approvers.dids
+  const publicKeyMode =
+    Array.isArray(publicKeys) &&
+    publicKeys.length > 0 &&
+    publicKeys.every((key) => typeof key === "string" && key.length > 0)
+  const didMode =
+    Array.isArray(dids) && dids.length > 0 && dids.every((did) => typeof did === "string" && did.length > 0)
+  if (publicKeyMode === didMode)
+    throw new Error(`${label}.approvers must contain a non-empty publicKeys or dids trust anchor`)
+  if (publicKeyMode && dids !== undefined)
+    throw new Error(`${label}.approvers must choose publicKeys or dids, never both`)
+  if (didMode && publicKeys !== undefined)
+    throw new Error(`${label}.approvers must choose dids or publicKeys, never both`)
+  if (publicKeyMode && approvers.resolveKey !== undefined)
+    throw new Error(`${label}.approvers publicKeys mode cannot also define resolveKey`)
+  if (didMode) {
+    if (approvers.resolveKey !== undefined && typeof approvers.resolveKey !== "function")
+      throw new Error(`${label}.approvers.resolveKey must be a function`)
+    if (
+      typeof approvers.resolveKey !== "function" &&
+      (dids as string[]).some((did) => !/^did:intyga:key:[A-Za-z0-9_-]{43}$/.test(did))
+    )
+      throw new Error(`${label}.approvers.resolveKey is required for non-self-certifying DIDs`)
+  }
+}
+
+export function assertAgentV1Runtime(value: unknown, label = "agentV1"): asserts value is AgentV1Runtime {
+  assertExecutionTrust(value, label)
+  const runtime = value as unknown as Record<string, unknown>
+  if (!["prepare", "liveConfig", "readState", "reserve"].every((key) => typeof runtime[key] === "function"))
+    throw new Error(`${label} must provide prepare, liveConfig, readState and durable reserve functions`)
+  if (!runtime.verifier || typeof runtime.verifier !== "object")
+    throw new Error(`${label}.verifier must be an object`)
 }
 
 // The out-of-band approval round trip: authenticate, raise a challenge, wait for the human, then
@@ -87,6 +196,10 @@ export interface ApprovalRequest {
   intervalMs?: number
   /** Mandatory for AI_AGENT keys. Provides v1 context and the RP's execution-time PEP. */
   agentV1?: AgentV1Runtime
+  /** Mandatory for SERVICE/human credentials. Independent receipt trust and policy floor. */
+  executionTrust?: ExecutionTrust
+  /** Cancels polling/redemption when the relying-party execution path is shutting down. */
+  signal?: AbortSignal
 }
 
 export type ApprovalOutcome =
@@ -96,8 +209,6 @@ export type ApprovalOutcome =
 
 /** Consecutive failed status checks tolerated before we call the gateway unreachable. */
 const MAX_POLL_ERRORS = 5
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 async function fromRp<T>(operation: string, run: () => Promise<T>): Promise<T> {
   try {
@@ -119,7 +230,9 @@ class RedirectRefused extends Error {}
 
 /** Every gateway request: never follow a redirect, and bound the wait (matches IntygaClient). */
 function gatewayFetch(url: string, init: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, redirect: "manual", signal: AbortSignal.timeout(GATEWAY_TIMEOUT_MS) })
+  const timeout = AbortSignal.timeout(GATEWAY_TIMEOUT_MS)
+  const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout
+  return fetch(url, { ...init, redirect: "manual", signal })
 }
 
 function refuseRedirect(res: Response, op: string): void {
@@ -127,7 +240,7 @@ function refuseRedirect(res: Response, op: string): void {
 }
 
 async function getToken(
-  req: Pick<ApprovalRequest, "gatewayUrl" | "clientId" | "clientSecret">,
+  req: Pick<ApprovalRequest, "gatewayUrl" | "clientId" | "clientSecret" | "signal">,
 ): Promise<string> {
   const basic = Buffer.from(`${req.clientId}:${req.clientSecret}`).toString("base64")
   const res = await gatewayFetch(`${req.gatewayUrl}/oauth/token`, {
@@ -137,6 +250,7 @@ async function getToken(
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: "grant_type=client_credentials",
+    signal: req.signal,
   })
   refuseRedirect(res, "Authentication with the Intyga gateway")
   if (!res.ok) throw new Error(`Failed to authenticate with Intyga gateway (status ${res.status})`)
@@ -174,6 +288,7 @@ async function openChallenge(
         req.actionDescription ??
         `Authorize action '${req.actionType}' with parameters: ${JSON.stringify(req.params)}`,
     }),
+    signal: req.signal,
   })
   refuseRedirect(res, "Requesting the approval challenge")
   if (!res.ok) {
@@ -216,10 +331,11 @@ async function waitForVerdict(
   let reauthenticated = false
 
   while (Date.now() < deadline) {
-    await sleep(intervalMs)
+    await sleep(intervalMs, undefined, { signal: req.signal })
     try {
       const res = await gatewayFetch(`${req.gatewayUrl}/authorize/${encodeURIComponent(nonce)}`, {
         headers: { Authorization: `Bearer ${token}` },
+        signal: req.signal,
       })
       refuseRedirect(res, "Approval status check")
       if (res.status === 401 && !reauthenticated) {
@@ -232,6 +348,7 @@ async function waitForVerdict(
       consecutiveErrors = 0
       if (status !== "PENDING") return { status, token, receipt }
     } catch (err) {
+      if (req.signal?.aborted) throw err
       // A redirect is configuration, not a blip: retrying cannot fix it.
       if (err instanceof RedirectRefused) throw err
       if (++consecutiveErrors >= MAX_POLL_ERRORS) {
@@ -256,6 +373,7 @@ async function consume(req: ApprovalRequest, token: string, nonce: string): Prom
     // `target` is REQUIRED by the authorizationConsume schema — omitting it is a 400, which would
     // make redemption unreachable and leave the approval replayable for the rest of its TTL.
     body: JSON.stringify({ nonce, target: req.target, actionType: req.actionType, params: req.params }),
+    signal: req.signal,
   })
   refuseRedirect(res, "Consuming the approved challenge")
   if (!res.ok) throw new Error("Failed to consume approved signature challenge")
@@ -273,7 +391,7 @@ async function consume(req: ApprovalRequest, token: string, nonce: string): Prom
  * leaves the approval as it was and surfaces only as missing evidence. Returns whether it was recorded.
  */
 export async function reportDispatched(
-  req: Pick<ApprovalRequest, "gatewayUrl" | "clientId" | "clientSecret">,
+  req: Pick<ApprovalRequest, "gatewayUrl" | "clientId" | "clientSecret" | "signal">,
   nonce: string,
   evidenceWithinSeconds: number,
 ): Promise<boolean> {
@@ -283,6 +401,7 @@ export async function reportDispatched(
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ evidenceWithinSeconds }),
+      signal: req.signal,
     })
     if (!res.ok) return false
     const body = (await res.json().catch(() => ({}))) as { ok?: boolean }
@@ -304,8 +423,14 @@ export async function requestApproval(req: ApprovalRequest): Promise<ApprovalOut
       gatewayUrl: assertGatewayUrl(req.gatewayUrl),
       params: params as Record<string, unknown>,
     }
-    const initialToken = await getToken(boundReq)
     const runtime = boundReq.agentV1
+    const executionTrust = boundReq.executionTrust
+    if ((runtime === undefined) === (executionTrust === undefined))
+      throw new Error("configure exactly one of agentV1 or executionTrust")
+    if (runtime) assertAgentV1Runtime(runtime)
+    else assertExecutionTrust(executionTrust, "executionTrust")
+    const initialToken = await getToken(boundReq)
+    boundReq.signal?.throwIfAborted()
     const prepared = runtime
       ? await fromRp("agent context", () =>
           runtime.prepare(
@@ -335,6 +460,9 @@ export async function requestApproval(req: ApprovalRequest): Promise<ApprovalOut
       }
     }
 
+    if (!receipt) throw new Error("Gateway approved the challenge without returning a receipt")
+    boundReq.signal?.throwIfAborted()
+
     if (runtime) {
       // The issuer's nbf and registered DID are retained from the opening response, never copied
       // from the receipt being verified. The other claims are the RP's own prepared context.
@@ -351,11 +479,9 @@ export async function requestApproval(req: ApprovalRequest): Promise<ApprovalOut
       )
         throw new Error("Gateway did not return the requested v1 agent context and receipt")
 
-      // Gateway redemption is single-use. A later local refusal burns the approval without running
-      // the tool; that is the safe outcome when configuration, trust or session state changed.
-      await consume(boundReq, token, nonce)
       const prior = await fromRp("agent session state", () => runtime.readState(issued.session.id))
       const expected = {
+        tenantId: runtime.tenantId,
         approvers: runtime.approvers,
         target: boundReq.target,
         actionType: boundReq.actionType,
@@ -363,6 +489,8 @@ export async function requestApproval(req: ApprovalRequest): Promise<ApprovalOut
         nonce,
         requesterDid: runtime.requesterDid,
         agentContext: issued,
+        requirement: runtime.requirement,
+        ...(runtime.enrolledDeviceKeys ? { enrolledDeviceKeys: runtime.enrolledDeviceKeys } : {}),
       }
       const proof = verifyAgentForExecution(
         receipt as Parameters<typeof verifyAgentForExecution>[0],
@@ -373,6 +501,19 @@ export async function requestApproval(req: ApprovalRequest): Promise<ApprovalOut
       )
       if (!proof.ok || !proof.nextHead)
         throw new Error(`v1 agent receipt refused: ${proof.reason ?? "no head"}`)
+      // Verify first so deterministic local failures never burn an otherwise usable approval.
+      // Redemption is deliberately before reservation: a reservation conflict may safely burn an
+      // approval, while reserving durable budget for a challenge the gateway refuses would corrupt
+      // RP state. Both gates complete before the handler is allowed to run.
+      boundReq.signal?.throwIfAborted()
+      await consume(boundReq, token, nonce)
+      boundReq.signal?.throwIfAborted()
+      const executionConfigDigest = agentConfigDigest(
+        await fromRp("live agent configuration", () => runtime.liveConfig()),
+      )
+      boundReq.signal?.throwIfAborted()
+      if (executionConfigDigest !== issued.agent.configDigest)
+        throw new Error("v1 agent configuration drifted immediately before reservation")
       const nextHead = proof.nextHead
       const reserved = await fromRp("agent reservation", () =>
         runtime.reserve({
@@ -383,9 +524,69 @@ export async function requestApproval(req: ApprovalRequest): Promise<ApprovalOut
           amount: issued.action.amount,
         }),
       )
+      boundReq.signal?.throwIfAborted()
       if (!reserved) throw new Error("v1 agent session, nonce or budget reservation refused")
+      const finalConfig = await fromRp("live agent configuration", () => runtime.liveConfig())
+      const finalProof = verifyAgentForExecution(
+        receipt as Parameters<typeof verifyAgentForExecution>[0],
+        expected,
+        finalConfig,
+        prior,
+        { ...runtime.verifier, allowAutoApproved: false, asOf: new Date() },
+      )
+      if (!finalProof.ok)
+        throw new Error(
+          `v1 agent receipt or runtime refused immediately before execution: ${finalProof.reason}`,
+        )
+      boundReq.signal?.throwIfAborted()
     } else {
+      if (!executionTrust) throw new Error("executionTrust is required")
+      const proof = verifyApprovalReceipt(
+        receipt as Parameters<typeof verifyApprovalReceipt>[0],
+        {
+          tenantId: executionTrust.tenantId,
+          approvers: executionTrust.approvers,
+          target: boundReq.target,
+          actionType: boundReq.actionType,
+          params: boundReq.params,
+          nonce,
+          requesterDid: executionTrust.requesterDid,
+          requirement: executionTrust.requirement,
+          ...(executionTrust.enrolledDeviceKeys
+            ? { enrolledDeviceKeys: executionTrust.enrolledDeviceKeys }
+            : {}),
+        },
+        { ...executionTrust.verifier, allowAutoApproved: false, allowExpired: false },
+      )
+      if (!proof.ok) throw new Error(`approval receipt refused: ${proof.reason}`)
+      boundReq.signal?.throwIfAborted()
       await consume(boundReq, token, nonce)
+      boundReq.signal?.throwIfAborted()
+      const finalProof = verifyApprovalReceipt(
+        receipt as Parameters<typeof verifyApprovalReceipt>[0],
+        {
+          tenantId: executionTrust.tenantId,
+          approvers: executionTrust.approvers,
+          target: boundReq.target,
+          actionType: boundReq.actionType,
+          params: boundReq.params,
+          nonce,
+          requesterDid: executionTrust.requesterDid,
+          requirement: executionTrust.requirement,
+          ...(executionTrust.enrolledDeviceKeys
+            ? { enrolledDeviceKeys: executionTrust.enrolledDeviceKeys }
+            : {}),
+        },
+        {
+          ...executionTrust.verifier,
+          allowAutoApproved: false,
+          allowExpired: false,
+          asOf: new Date(),
+        },
+      )
+      if (!finalProof.ok)
+        throw new Error(`approval receipt expired or changed before execution: ${finalProof.reason}`)
+      boundReq.signal?.throwIfAborted()
     }
     return { outcome: "approved", nonce }
   } catch (err) {

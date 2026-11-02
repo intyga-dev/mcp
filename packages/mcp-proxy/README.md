@@ -14,6 +14,10 @@ default export implements `AgentV1Runtime` from `@intyga/mcp-sdk`. The proxy the
 and requires an atomic nonce/session/budget reservation before forwarding the call. Without that
 module the gateway refuses AI-agent requests.
 
+For a SERVICE or human key, pass `--execution-trust-module`. Its default export supplies independent
+`tenantId`, `requesterDid`, `approvers`, `requirement`, and optional verifier options. Exactly one
+trust module is required; gateway status alone never authorizes forwarding.
+
 ```sh
 intyga-proxy \
   --target-command npx \
@@ -40,7 +44,8 @@ proxy spawns the real server as a child and mediates the protocol stream.
 | `--local-policy` | — | Path to a policy manifest JSON — same format and same evaluator as [`@intyga/mcp-sdk`](../mcp-sdk), so the two enforcement paths cannot disagree |
 | `--target-command` | — | The real MCP server executable (required) |
 | `--target-args` | — | Its arguments, as a JSON **array of strings** — an object is refused, because Node would read it as the spawn *options* and a `{"shell": true}` smuggle would turn the command into a shell string |
-| `--agent-v1-module` | `INTYGA_AGENT_V1_MODULE` | Absolute or relative path to the trusted RP v1 runtime module. Mandatory for AI-agent keys. Export `default` with `requesterDid`, `approvers`, `verifier`, `prepare`, `liveConfig`, `readState`, and `reserve` as documented in [`@intyga/mcp-sdk`](../mcp-sdk). |
+| `--agent-v1-module` | `INTYGA_AGENT_V1_MODULE` | Absolute or relative path to the trusted RP v1 runtime module. Mandatory for AI-agent keys. Export `default` with `tenantId`, `requesterDid`, `approvers`, `requirement`, `verifier`, `prepare`, `liveConfig`, `readState`, and `reserve` as documented in [`@intyga/mcp-sdk`](../mcp-sdk). |
+| `--execution-trust-module` | `INTYGA_EXECUTION_TRUST_MODULE` | RP-owned SERVICE/human receipt trust. Export `default` with `tenantId`, `requesterDid`, `approvers`, `requirement`, and optional `verifier`. Mutually exclusive with `--agent-v1-module`. |
 
 ## Security properties (each of these is tested)
 
@@ -63,11 +68,17 @@ proxy spawns the real server as a child and mediates the protocol stream.
   other, and a runaway agent cannot fan out unbounded approval prompts. Non-mutating protocol
   traffic (`initialize`, `ping`, `*/list`) bypasses the queue so a pending human decision cannot
   make the client conclude the server is dead.
-- **v1 agent calls require a receipt and an RP reservation.** Even a local `allow` rule cannot skip
+- **Every call requires a verified, human-signed receipt.** `AUTO_APPROVED` is refused. Both module
+  types bind tenant, requester, target, parameters, nonce, approver trust and requirement floor before
+  one-time gateway consumption. **v1 agent calls also require an RP reservation.** Even a local `allow` rule cannot skip
   that check, including when `--agent-v1-module` was omitted. The gateway refuses an AI-agent key
   without its v1 context. `reserve` must use a durable compare-and-swap
   transaction and enforce the budget across sessions. The proxy does not provide a database or a
   trustworthy view of the agent's actual model, tools or prompt; your RP module must provide both.
+  Executable floors support `requiredApprovals`, `requesterCannotApprove`,
+  `requireHardwareKey`, and `excludedSignerDids`; fields such as `allowedAaguids` and `signerClass` are rejected at startup
+  rather than silently ignored. Use `requireHardwareKey` for direct model restrictions, subject to
+  the verifier's documented offline assurance limits.
 - **The wrapped server never sees your INTYGA credentials.** Every `INTYGA_*` variable is stripped
   from the child's environment; everything else passes through. Run untrusted third-party servers
   under a separate OS identity or sandbox so they cannot read the RP module's state, files or parent

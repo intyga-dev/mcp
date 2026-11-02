@@ -45,7 +45,8 @@ server.tool("transfer_funds", /* schema */ {}, async (args) => {
    AI-agent key was configured without `agentV1`, so forgetting the runtime cannot bypass v1.
 2. **Everything else goes through the gateway.** The gateway raises a challenge or applies its
    configured approval policy. For `AI_AGENT`, the wrapper
-   verifies the receipt and reserves the session before calling the tool. Default wait is 120 s,
+   verifies the receipt, consumes it once, and reserves the session before calling the tool. SERVICE
+   and human credentials require equivalent independent checks through `executionTrust`. Default wait is 120 s,
    polling every 2 s (`timeoutMs` / `intervalMs` to override).
 3. **Fail closed.** Absent policy, unparseable policy, an unknown action, a malformed rule, or
    `enforcement: "gateway-enforced"` — all of these escalate rather than execute. One malformed
@@ -74,11 +75,19 @@ Passed as a JSON string via `localPolicyJson`:
 - The manifest is Zod-validated at the boundary. Shapes like `{"rules": 5}` or a rule with
   `maxAmount: "abc"` do not throw and do not allow — they escalate.
 
+## Required execution trust
+
+Every integration supplies RP-owned `tenantId`, `requesterDid`, `approvers`, and `requirement`.
+For SERVICE/human credentials provide them as `executionTrust`; for AI_AGENT credentials they are
+part of `agentV1`. Neither gateway status nor keys embedded in a receipt are trusted. Receipts are
+verified before one-time consumption, and `AUTO_APPROVED` receipts are always refused.
+
 ## v1 agent runtime contract
 
 `agentV1` implements the exported `AgentV1Runtime` interface:
 
-- `requesterDid`, `approvers`, `verifier`: pin the registered agent DID, approver keys and WebAuthn
+- `tenantId`, `requesterDid`, `approvers`, `requirement`, `verifier`: pin the tenant, registered agent DID,
+  approver keys, ordinary rule floor and WebAuthn
   origin/RP ID from RP-controlled configuration. A delegated agent also needs the trusted complete
   authority chain in `verifier.agentAuthorityChain`.
 - `prepare(actionType, params)`: derive `action.reversibility`, decimal `action.amount`,
@@ -93,18 +102,22 @@ Passed as a JSON string via `localPolicyJson`:
   then store `next` and the nonce. Return `false` on conflict. A process-local map is insufficient.
 
 These hooks are intentionally supplied by the executing RP: the wrapper cannot know its database,
-trusted approver enrollment or live agent runtime. The receipt is consumed at the gateway before
-local verification/reservation; a local refusal burns it and never runs the tool. A crash after
+trusted approver enrollment or live agent runtime. The receipt is locally verified before gateway
+consumption. Consumption precedes reservation, so a reservation conflict may safely burn an approval
+but never runs the tool. A crash after
 reservation can leave an approved action unexecuted, but cannot authorize a second execution.
 Do not put raw prompts or personal data in receipt fields or logs.
 
 ## Coverage — worth knowing exactly
 
-Both registration entrypoints are wrapped: `server.tool(...)` **and** `server.registerTool(...)`
-(they are separate code paths in `@modelcontextprotocol/sdk`, and current MCP docs steer users to
-the latter). The handle returned by registration is patched too, so
-`registered.update({ callback })` re-gates the replacement handler — including under a rename in
-the same call, which changes which policy rule applies.
+The adapter pins `@modelcontextprotocol/sdk` 1.32.1, requires an exact instance of that pinned
+`McpServer` class (not a subclass or another installed copy), and intercepts its common registered-
+tool creation primitive. This covers `tool`, `registerTool`, `experimental.tasks.registerToolTask`,
+tools registered before wrapping, callback replacement, and rename-only updates. An unknown SDK
+shape is refused during setup rather than left callable without approval.
+Parsed arguments are snapshotted before the first await. Caller `_meta` is removed before the
+business callback except for the transport-only `progressToken`; task routing stays in the MCP
+context's dedicated task fields.
 
 Not covered, stated plainly: a caller that bypasses `McpServer` entirely and installs a raw
 `tools/call` handler on the underlying low-level `Server`. If you need that gated with no code
@@ -120,10 +133,18 @@ changes to the server, put [`@intyga/mcp-proxy`](../mcp-proxy) in front of it in
   `{ outcome: "approved", nonce }` only after v1 verification/reservation when `agentV1` is present,
   `{ outcome: "refused", status, reason }`, or
   `{ outcome: "error", reason }`.
+- `assertExecutionTrust(value)` — validate an RP-owned tenant/requester/approver/floor module at
+  startup; used by the proxy loader and available to custom launchers.
+
+The executable requirement floor supports `requiredApprovals`, `requesterCannotApprove`,
+`requireHardwareKey`, and `excludedSignerDids`. Other receipt-policy fields, including `allowedAaguids` and `signerClass`, are
+rejected during setup rather than silently ignored. Use `requireHardwareKey` when direct model
+restrictions are needed; its offline assurance limits remain those documented by the verifier.
 
 `IntygaConfig`: `gatewayUrl`, `clientId`, `clientSecret`, `agentId`, `target?` (defaults to
 `agentId`), `enforcement?` (`"local-first"` default | `"gateway-enforced"`), `localPolicyJson?`,
-`timeoutMs?`, `intervalMs?`, `agentV1?` (required with an AI_AGENT key).
+`timeoutMs?`, `intervalMs?`, and exactly one of `agentV1` (AI_AGENT) or `executionTrust`
+(SERVICE/human).
 
 `gatewayUrl` must be `https://`: `intygafyServer` throws (and `requestApproval` returns an `error`
 outcome) for plain `http://` except to a loopback host (`localhost`, `127.0.0.0/8`, `::1`), and no

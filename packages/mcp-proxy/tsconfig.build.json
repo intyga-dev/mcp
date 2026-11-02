@@ -1,7 +1,10 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "sourceMap": false
+    "sourceMap": false,
+    // Typecheck-only (see tsconfig.json): the build excludes tests, and enabling it here would make
+    // tsc wrap the CLI's dynamic imports in a rewrite helper.
+    "rewriteRelativeImportExtensions": false
   },
   "exclude": ["src/**/*.test.ts"]
 }

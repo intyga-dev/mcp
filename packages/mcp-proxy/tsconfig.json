@@ -3,7 +3,9 @@
   "compilerOptions": {
     "rootDir": "src",
     "outDir": "dist",
-    "types": ["node"]
+    "types": ["node"],
+    // Typecheck includes tests, which import @intyga/mcp-schemas as TS source (`./x.ts` specifiers).
+    "rewriteRelativeImportExtensions": true
   },
   "include": ["src/**/*.ts"]
 }

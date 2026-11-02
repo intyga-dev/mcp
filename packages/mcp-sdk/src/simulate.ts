@@ -1,11 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
+import fs from "node:fs"
+import { pathToFileURL } from "node:url"
 import { z } from "zod"
-import { intygafyServer } from "./index.js"
+import { assertExecutionTrust, intygafyServer } from "./index.js"
 
 async function runSimulation() {
-  console.log("=== Intyga MCP SDK Simulator ===")
+  console.log("=== INTYGA MCP SDK Simulator ===")
 
   const server = new McpServer({ name: "simulator-server", version: "1.0.0" })
+  const trustModule = process.env.INTYGA_EXECUTION_TRUST_MODULE
+  if (!trustModule) throw new Error("INTYGA_EXECUTION_TRUST_MODULE is required")
+  const executionTrust: unknown = (await import(pathToFileURL(fs.realpathSync(trustModule)).href)).default
+  assertExecutionTrust(executionTrust, "INTYGA_EXECUTION_TRUST_MODULE default export")
 
   // Register three sample tools on the server
   server.tool("get_status", "Get server status", {}, async () => {
@@ -69,6 +75,7 @@ async function runSimulation() {
     clientId: process.env.INTYGA_CLIENT_ID || "did:intyga:client-dev",
     clientSecret: process.env.INTYGA_CLIENT_SECRET || "dev_secret_key",
     agentId: process.env.INTYGA_AGENT_ID || "did:intyga:agent-001",
+    executionTrust,
     enforcement: "local-first",
     localPolicyJson,
   })

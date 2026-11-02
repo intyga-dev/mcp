@@ -1,6 +1,6 @@
 {
   "name": "@intyga/mcp-proxy",
-  "version": "2.1.0",
+  "version": "3.1.0",
   "description": "Stdio proxy that gates a third-party MCP server's tool calls behind a signed human approval \u2014 no code changes to the wrapped server.",
   "license": "Apache-2.0",
   "repository": {
@@ -38,11 +38,12 @@
     "build": "rm -rf dist && tsc --project tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test 'src/**/*.test.ts'",
-    "test:coverage": "tsx --test --experimental-test-coverage --test-coverage-lines=98 --test-coverage-branches=98 --test-coverage-functions=98 'src/**/*.test.ts'"
+    "test:coverage": "pnpm build && node --test scripts/union-coverage.test.mjs && node scripts/run-coverage.mjs"
   },
   "devDependencies": {
     "@intyga/config": "workspace:*",
-    "@types/node": "^26.6.4",
+    "@intyga/mcp-schemas": "workspace:*",
+    "@types/node": "^26.6.5",
     "typescript": "^5.9.3"
   },
   "dependencies": {

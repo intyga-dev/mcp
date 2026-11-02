@@ -9,7 +9,12 @@ import http from "node:http"
 import type { AddressInfo } from "node:net"
 import { test } from "node:test"
 import { agentConfigDigest, canonicalIntentPayload, type AgentIntentContext } from "@intyga/sdk"
-import { requestApproval, type AgentV1Runtime } from "./approval-client.ts"
+import {
+  assertExecutionTrust,
+  reportDispatched,
+  requestApproval,
+  type AgentV1Runtime,
+} from "./approval-client.ts"
 
 const BASE = {
   gatewayUrl: "https://gw.example",
@@ -19,6 +24,93 @@ const BASE = {
   actionType: "transfer",
   params: { amount: 5000 },
   intervalMs: 1, // keep the tests fast; the loop's shape is what matters, not the wall clock
+  executionTrust: undefined as unknown as import("./approval-client.ts").ExecutionTrust,
+}
+
+test("dispatch reporting is best effort when authentication or transport throws", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  globalThis.fetch = (async () => {
+    throw new Error("private transport detail")
+  }) as typeof fetch
+  assert.equal(await reportDispatched(BASE, "dispatch-nonce", 30), false)
+})
+
+test("authentication refusal stops before approval credentials reach an action route", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  const paths: string[] = []
+  globalThis.fetch = (async (url: unknown) => {
+    paths.push(new URL(String(url)).pathname)
+    return { ok: false, status: 401, json: async () => ({}) } as unknown as Response
+  }) as typeof fetch
+
+  const result = await requestApproval(BASE)
+  assert.deepEqual(paths, ["/oauth/token"])
+  assert.equal(result.outcome, "error")
+  assert.match(result.outcome === "error" ? result.reason : "", /authenticate.*status 401/i)
+})
+
+const SERVICE_KEYS = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" })
+const SERVICE_PUBLIC_KEY = SERVICE_KEYS.publicKey.export({ format: "der", type: "spki" }).toString("base64")
+const SERVICE_TENANT = "11111111-1111-4111-8111-111111111111"
+const SERVICE_DID = "did:intyga:service:test"
+const SERVICE_REQUIREMENT = {
+  requiredApprovals: 1,
+  requireHardwareKey: false,
+  requesterCannotApprove: true,
+}
+const SIGNED_REQUIREMENT = {
+  ...SERVICE_REQUIREMENT,
+  allowedAaguids: [] as string[],
+  excludedSignerDids: [] as string[],
+  signerClass: "human" as const,
+}
+const SERVICE_TRUST = {
+  tenantId: SERVICE_TENANT,
+  requesterDid: SERVICE_DID,
+  approvers: {
+    dids: ["did:intyga:owner"],
+    resolveKey: (did: string) => (did === "did:intyga:owner" ? SERVICE_PUBLIC_KEY : null),
+  },
+  requirement: SERVICE_REQUIREMENT,
+}
+BASE.executionTrust = SERVICE_TRUST
+
+function serviceReceipt(nonce = "n-1") {
+  const expiresAt = new Date(Date.now() + 180_000).toISOString()
+  const actionDescription = `Authorize action '${BASE.actionType}' with parameters: ${JSON.stringify(BASE.params)}`
+  const canonicalPayload = canonicalIntentPayload({
+    tenantId: SERVICE_TENANT,
+    target: BASE.target,
+    actionType: BASE.actionType,
+    display: actionDescription,
+    params: BASE.params,
+    requester: { did: SERVICE_DID, attestation: null },
+    requirement: SIGNED_REQUIREMENT,
+    nonce,
+    expiresAt,
+  })
+  return {
+    canonicalPayload,
+    actionDescription,
+    params: BASE.params,
+    requester: { did: SERVICE_DID, attestation: null },
+    signerDid: "did:intyga:owner",
+    signerPublicKey: SERVICE_PUBLIC_KEY,
+    signature: crypto
+      .sign("sha256", Buffer.from(canonicalPayload), {
+        key: SERVICE_KEYS.privateKey,
+        dsaEncoding: "ieee-p1363",
+      })
+      .toString("base64"),
+    sigAlg: "ES256" as const,
+    verificationCode: "unused",
+  }
 }
 
 type StatusStep = { status: string } | { fail: true } | { httpStatus: number }
@@ -54,7 +146,10 @@ function stubGateway(steps: StatusStep[], opts: { consumeOk?: boolean } = {}) {
       const step = steps[Math.min(statusCalls++, steps.length - 1)]!
       if ("fail" in step) throw new Error("socket hang up")
       if ("httpStatus" in step) return json({}, false, step.httpStatus)
-      return json({ status: step.status })
+      return json({
+        status: step.status,
+        ...(step.status === "APPROVED" ? { receipt: serviceReceipt() } : {}),
+      })
     }
     throw new Error(`unexpected route: ${u}`)
   }) as typeof fetch
@@ -76,6 +171,124 @@ test("a transient failure mid-wait is ridden out and the approval still lands", 
   // The human is still deciding; one dropped socket must not throw their decision away.
   const r = await requestApproval(BASE)
   assert.equal(r.outcome, "approved")
+})
+
+test("service receipt verification precedes consumption and enforces RP tenant and floor", async (t) => {
+  const gw = stubGateway([{ status: "APPROVED" }])
+  t.after(gw.restore)
+  const wrongTenant = await requestApproval({
+    ...BASE,
+    executionTrust: { ...SERVICE_TRUST, tenantId: "22222222-2222-4222-8222-222222222222" },
+  })
+  assert.equal(wrongTenant.outcome, "error")
+  assert.match(wrongTenant.outcome === "error" ? wrongTenant.reason : "", /tenant/i)
+  assert.equal(gw.consumeBearer(), undefined, "deterministic proof failure must not consume")
+
+  const weakFloor = await requestApproval({
+    ...BASE,
+    executionTrust: { ...SERVICE_TRUST, requirement: { requiredApprovals: 2 } },
+  })
+  assert.equal(weakFloor.outcome, "error")
+  assert.match(weakFloor.outcome === "error" ? weakFloor.reason : "", /weaker|approval/i)
+  assert.equal(gw.consumeBearer(), undefined)
+
+  const missingExclusion = await requestApproval({
+    ...BASE,
+    executionTrust: {
+      ...SERVICE_TRUST,
+      requirement: {
+        ...SERVICE_REQUIREMENT,
+        excludedSignerDids: ["did:intyga:controller"],
+      },
+    },
+  })
+  assert.equal(missingExclusion.outcome, "error")
+  assert.match(missingExclusion.outcome === "error" ? missingExclusion.reason : "", /weaker|exclusion/i)
+  assert.equal(gw.consumeBearer(), undefined, "an unmet exclusion floor must not be stripped before verify")
+})
+
+test("execution trust validates and forwards a signed empty exclusion floor", async (t) => {
+  const executionTrust = {
+    ...SERVICE_TRUST,
+    requirement: { ...SERVICE_REQUIREMENT, excludedSignerDids: [] },
+  }
+  assert.doesNotThrow(() => assertExecutionTrust(executionTrust))
+  for (const excludedSignerDids of ["did:intyga:owner", ["not-a-did"], [7]]) {
+    assert.throws(
+      () =>
+        assertExecutionTrust({
+          ...SERVICE_TRUST,
+          requirement: { ...SERVICE_REQUIREMENT, excludedSignerDids },
+        }),
+      /invalid policy-floor fields/,
+    )
+  }
+  assert.throws(
+    () =>
+      assertExecutionTrust({
+        ...SERVICE_TRUST,
+        requirement: { ...SERVICE_REQUIREMENT, excludedSignerDids: [], unsupported: true },
+      }),
+    /unsupported execution floor fields/,
+  )
+
+  const gw = stubGateway([{ status: "APPROVED" }])
+  t.after(gw.restore)
+  const result = await requestApproval({ ...BASE, executionTrust })
+  assert.equal(result.outcome, "approved", result.outcome === "error" ? result.reason : undefined)
+  assert.equal(gw.consumeBearer(), "Bearer tok-1")
+})
+
+test("execution trust validates enrolled device keys and forwards them to both receipt checks (DIV §4.3.2)", async (t) => {
+  for (const enrolledDeviceKeys of ["key", [""], [7], [null]]) {
+    assert.throws(
+      () => assertExecutionTrust({ ...SERVICE_TRUST, enrolledDeviceKeys } as never),
+      /enrolledDeviceKeys must be an array of non-empty base64 keys/,
+    )
+  }
+  const executionTrust = { ...SERVICE_TRUST, enrolledDeviceKeys: ["MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE"] }
+  assert.doesNotThrow(() => assertExecutionTrust(executionTrust))
+  // The receipt's signed policy does not require a device, so a supplied device-key list changes
+  // nothing: the same receipt still verifies before and after consumption.
+  const gw = stubGateway([{ status: "APPROVED" }])
+  t.after(gw.restore)
+  const result = await requestApproval({ ...BASE, executionTrust })
+  assert.equal(result.outcome, "approved", result.outcome === "error" ? result.reason : undefined)
+  assert.equal(gw.consumeBearer(), "Bearer tok-1")
+})
+
+test("service execution refuses AUTO_APPROVED even if verifier options try to allow it", async (t) => {
+  const original = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = original
+  })
+  let consumed = false
+  const signed = serviceReceipt()
+  const automatic = {
+    canonicalPayload: signed.canonicalPayload,
+    actionDescription: signed.actionDescription,
+    params: signed.params,
+    requester: signed.requester,
+    sigAlg: "AUTO_APPROVED" as const,
+    verificationCode: "unused",
+  }
+  globalThis.fetch = (async (url: unknown) => {
+    const u = String(url)
+    if (u.endsWith("/oauth/token")) return Response.json({ access_token: "token" })
+    if (u.endsWith("/authorize")) return Response.json({ nonce: "n-1" })
+    if (u.endsWith("/authorize/verify")) {
+      consumed = true
+      return Response.json({ ok: true })
+    }
+    return Response.json({ status: "APPROVED", receipt: automatic })
+  }) as typeof fetch
+  const outcome = await requestApproval({
+    ...BASE,
+    executionTrust: { ...SERVICE_TRUST, verifier: { allowAutoApproved: true } },
+  })
+  assert.equal(outcome.outcome, "error")
+  assert.match(outcome.outcome === "error" ? outcome.reason : "", /auto-approved/i)
+  assert.equal(consumed, false)
 })
 
 test("v1 agent approval verifies the receipt and reserves the session before execution", async (t) => {
@@ -109,6 +322,7 @@ test("v1 agent approval verifies the receipt and reserves the session before exe
     nbf,
   }
   const payload = canonicalIntentPayload({
+    tenantId: SERVICE_TENANT,
     target: BASE.target,
     actionType: BASE.actionType,
     display: "Pay invoice",
@@ -146,10 +360,16 @@ test("v1 agent approval verifies the receipt and reserves the session before exe
   let config = liveConfig
   let driftOnConsume = false
   let reservationAllowed = true
+  let abortOnReserve: AbortController | undefined
   const runtime: AgentV1Runtime = {
+    tenantId: SERVICE_TENANT,
     requesterDid: agentContext.agent.label,
-    approvers: { dids: ["did:intyga:owner"], resolveKey: () => publicKey },
+    approvers: {
+      dids: ["did:intyga:owner"],
+      resolveKey: (did: string) => (did === "did:intyga:owner" ? publicKey : null),
+    },
     verifier: {},
+    requirement: SERVICE_REQUIREMENT,
     prepare: async () => ({
       action: agentContext.action,
       delegatedBy: null,
@@ -159,6 +379,7 @@ test("v1 agent approval verifies the receipt and reserves the session before exe
     readState: async () => ({ head: null, seq: "0", aggregate: null }),
     reserve: async ({ next }) => {
       reserved++
+      abortOnReserve?.abort(new Error("stopped after reservation"))
       return reservationAllowed && next.seq === "1"
     },
   }
@@ -178,8 +399,9 @@ test("v1 agent approval verifies the receipt and reserves the session before exe
     throw new Error("unexpected endpoint")
   }) as typeof fetch
 
-  const request = { ...BASE, actionDescription: "Pay invoice", agentV1: runtime }
-  assert.equal((await requestApproval(request)).outcome, "approved")
+  const request = { ...BASE, actionDescription: "Pay invoice", executionTrust: undefined, agentV1: runtime }
+  const approved = await requestApproval(request)
+  assert.equal(approved.outcome, "approved", approved.outcome === "error" ? approved.reason : undefined)
   assert.equal(reserved, 1)
   assert.deepEqual((seenInput as { agentContext: unknown }).agentContext, {
     action: agentContext.action,
@@ -201,6 +423,13 @@ test("v1 agent approval verifies the receipt and reserves the session before exe
   assert.equal(conflict.outcome, "error")
   assert.match(conflict.outcome === "error" ? conflict.reason : "", /reservation refused/)
   assert.equal(reserved, 2)
+
+  reservationAllowed = true
+  abortOnReserve = new AbortController()
+  const stopped = await requestApproval({ ...request, signal: abortOnReserve.signal })
+  assert.equal(stopped.outcome, "error")
+  assert.match(stopped.outcome === "error" ? stopped.reason : "", /stopped after reservation/)
+  assert.equal(reserved, 3)
 })
 
 test("a 502 counts as a blip, not as a verdict", async (t) => {
@@ -327,7 +556,7 @@ test("the round trip uses the agent-facing routes and binds the target on both c
     if (u.endsWith("/oauth/token")) return json({ access_token: "tok" })
     if (u.endsWith("/authorize/verify")) return json({ ok: true })
     if (u.endsWith("/authorize")) return json({ nonce: "n-1", status: "PENDING" })
-    if (u.includes("/authorize/")) return json({ status: "APPROVED" })
+    if (u.includes("/authorize/")) return json({ status: "APPROVED", receipt: serviceReceipt() })
     throw new Error(`unexpected route: ${u}`)
   }) as typeof fetch
 
@@ -430,7 +659,7 @@ test("a 200 that does not confirm the redemption is still a refusal", async () =
     if (u.endsWith("/oauth/token")) return json({ access_token: "tok" })
     if (u.endsWith("/authorize/verify")) return json({ ok: false, reason: "params do not match" })
     if (u.endsWith("/authorize")) return json({ nonce: "n-1", status: "PENDING" })
-    if (u.includes("/authorize/")) return json({ status: "APPROVED" })
+    if (u.includes("/authorize/")) return json({ status: "APPROVED", receipt: serviceReceipt() })
     throw new Error(`unexpected route: ${u}`)
   }) as typeof fetch
 
@@ -440,6 +669,61 @@ test("a 200 that does not confirm the redemption is still a refusal", async () =
     assert.match((r as { reason: string }).reason, /params do not match/)
   } finally {
     globalThis.fetch = original
+  }
+})
+
+test("shutdown aborts a pending approval before polling or consumption", async (t) => {
+  const original = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = original
+  })
+  const controller = new AbortController()
+  let statusReads = 0
+  let consumes = 0
+  globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+    const path = new URL(String(url)).pathname
+    const json = (body: unknown) => Response.json(body)
+    if (path === "/oauth/token") return json({ access_token: "tok" })
+    if (path === "/authorize") {
+      assert.equal(init?.signal?.aborted, false)
+      controller.abort(new Error("proxy stopping"))
+      return json({ nonce: "n-1" })
+    }
+    if (path === "/authorize/verify") consumes++
+    else statusReads++
+    return json({ status: "APPROVED", receipt: serviceReceipt(), ok: true })
+  }) as typeof fetch
+  const outcome = await requestApproval({ ...BASE, timeoutMs: 10_000, signal: controller.signal })
+  assert.equal(outcome.outcome, "error")
+  assert.match((outcome as { reason: string }).reason, /aborted|proxy stopping/i)
+  assert.equal(statusReads, 0)
+  assert.equal(consumes, 0)
+})
+
+test("shutdown between verdict and consume, or during consume, never returns approved", async (t) => {
+  const original = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = original
+  })
+  for (const abortAt of ["verdict", "consume"] as const) {
+    const controller = new AbortController()
+    let consumes = 0
+    globalThis.fetch = (async (url: unknown) => {
+      const path = new URL(String(url)).pathname
+      if (path === "/oauth/token") return Response.json({ access_token: "tok" })
+      if (path === "/authorize") return Response.json({ nonce: "n-1" })
+      if (path === "/authorize/verify") {
+        consumes++
+        if (abortAt === "consume") controller.abort(new Error("stopped during consume"))
+        return Response.json({ ok: true })
+      }
+      if (abortAt === "verdict") controller.abort(new Error("stopped after verdict"))
+      return Response.json({ status: "APPROVED", receipt: serviceReceipt() })
+    }) as typeof fetch
+    const outcome = await requestApproval({ ...BASE, signal: controller.signal })
+    assert.equal(outcome.outcome, "error")
+    assert.match((outcome as { reason: string }).reason, /stopped/)
+    assert.equal(consumes, abortAt === "consume" ? 1 : 0)
   }
 })
 
@@ -501,7 +785,7 @@ async function redirectingGateway(
         res.end()
       } else if (path === "/oauth/token") res.end(JSON.stringify({ access_token: "tok" }))
       else if (path === "/authorize") res.end(JSON.stringify({ nonce: "n-1", status: "PENDING" }))
-      else res.end(JSON.stringify({ status: "APPROVED" }))
+      else res.end(JSON.stringify({ status: "APPROVED", receipt: serviceReceipt() }))
     }),
   )
   return { origin, reached }

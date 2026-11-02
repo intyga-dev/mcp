@@ -3,8 +3,19 @@
 import { spawn } from "node:child_process"
 import fs from "node:fs"
 import readline from "node:readline"
-import { assertGatewayUrl, evaluatePolicy, requestApproval, type AgentV1Runtime } from "@intyga/mcp-sdk"
+import { StringDecoder } from "node:string_decoder"
+import {
+  assertGatewayUrl,
+  assertAgentV1Runtime,
+  assertExecutionTrust,
+  evaluatePolicy,
+  requestApproval,
+  type AgentV1Runtime,
+  type ExecutionTrust,
+} from "@intyga/mcp-sdk"
 import { pathToFileURL } from "node:url"
+import { signalProcessTree } from "./process-tree.js"
+import { runGateOperation } from "./gate-operation.js"
 
 // Simple CLI arguments parser
 const args = process.argv.slice(2)
@@ -21,13 +32,15 @@ const localPolicyPath = getArg("--local-policy") || ""
 const targetCommand = getArg("--target-command") || ""
 const targetArgsStr = getArg("--target-args") || "[]"
 const agentV1Module = getArg("--agent-v1-module") || process.env.INTYGA_AGENT_V1_MODULE || ""
+const executionTrustModule =
+  getArg("--execution-trust-module") || process.env.INTYGA_EXECUTION_TRUST_MODULE || ""
 
 function getArg(flag: string): string | null {
   const index = args.indexOf(flag)
-  if (index !== -1 && index + 1 < args.length) {
-    return args[index + 1] ?? null
-  }
-  return null
+  if (index === -1) return null
+  const value = args[index + 1]
+  if (value === undefined) throw new Error(`${flag} requires a value`)
+  return value
 }
 
 if (!targetCommand) {
@@ -73,19 +86,18 @@ try {
 let agentV1: AgentV1Runtime | undefined
 if (agentV1Module) {
   const candidate: unknown = (await import(pathToFileURL(fs.realpathSync(agentV1Module)).href)).default
-  if (
-    !candidate ||
-    typeof candidate !== "object" ||
-    !["prepare", "liveConfig", "readState", "reserve"].every(
-      (key) => typeof (candidate as Record<string, unknown>)[key] === "function",
-    ) ||
-    typeof (candidate as Record<string, unknown>).requesterDid !== "string" ||
-    !(candidate as Record<string, unknown>).approvers ||
-    !(candidate as Record<string, unknown>).verifier
-  )
-    throw new Error("--agent-v1-module must export an RP-owned AgentV1Runtime")
-  agentV1 = candidate as AgentV1Runtime
+  assertAgentV1Runtime(candidate, "--agent-v1-module default export")
+  agentV1 = candidate
 }
+
+let executionTrust: ExecutionTrust | undefined
+if (executionTrustModule) {
+  const candidate: unknown = (await import(pathToFileURL(fs.realpathSync(executionTrustModule)).href)).default
+  assertExecutionTrust(candidate, "--execution-trust-module default export")
+  executionTrust = candidate
+}
+if ((agentV1 === undefined) === (executionTrust === undefined))
+  throw new Error("Configure exactly one of --agent-v1-module or --execution-trust-module")
 
 if (getArg("--client-secret")) {
   // argv is world-readable via `ps`, and the target server can read it from /proc/<ppid>/cmdline —
@@ -103,11 +115,13 @@ const childEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =
 const child = spawn(targetCommand, targetArgs, {
   stdio: ["pipe", "pipe", "inherit"],
   env: childEnv,
+  // A launcher (`npx`, shell wrapper, package runner) may spawn the actual MCP server. Give the
+  // target its own POSIX process group so shutdown reaches the entire wrapped tree.
+  detached: process.platform !== "win32",
 })
-
-child.on("exit", (code) => {
-  process.exit(code ?? 0)
-})
+// Node may clear `child.pid` after the leader exits; retain the process-group id so descendants can
+// still be terminated when a launcher exits before the actual MCP server.
+const targetPid = child.pid
 
 // Setup stdio interfaces
 const rl = readline.createInterface({
@@ -122,9 +136,55 @@ const rl = readline.createInterface({
 // Holding partial child output until it is newline-terminated means a proxy message can only ever be
 // written at a line boundary.
 let childStdoutTail = ""
+const childStdoutDecoder = new StringDecoder("utf8")
+
+let shuttingDown = false
+let forcedParentStop: NodeJS.Timeout | undefined
+const shutdown = new AbortController()
+let finalExitCode = 0
+
+function signalTarget(signal: NodeJS.Signals): void {
+  signalProcessTree(child, targetPid, signal)
+}
+
+function stopProxy(signal?: NodeJS.Signals, exitCode = 0): void {
+  if (shuttingDown) return
+  shuttingDown = true
+  finalExitCode = exitCode
+  shutdown.abort(new Error("MCP proxy is shutting down"))
+  rl.close()
+  process.stdin.pause()
+  child.stdin?.end()
+  if (targetPid !== undefined) {
+    signalTarget(signal ?? "SIGTERM")
+    setTimeout(() => {
+      signalTarget("SIGKILL")
+    }, 2_000)
+  }
+  // An RP adapter or network implementation may ignore AbortSignal. It must not keep a terminated
+  // proxy alive for the approval timeout, so shutdown retains one hard, bounded process deadline.
+  forcedParentStop = setTimeout(() => process.exit(finalExitCode), 3_000)
+}
+
+process.once("SIGTERM", () => stopProxy("SIGTERM"))
+process.once("SIGINT", () => stopProxy("SIGINT"))
+
+child.on("exit", (code) => {
+  if (!shuttingDown) stopProxy(undefined, code ?? 1)
+  // Leave naturally so Node flushes V8 coverage. A signal-triggered orderly shutdown is success;
+  // an independently failing target retains its status for supervisors.
+  process.exitCode = finalExitCode
+  if (forcedParentStop && pendingToolCalls === 0) clearTimeout(forcedParentStop)
+})
+
+child.stdout?.on("end", () => {
+  const decodedTail = childStdoutDecoder.end()
+  if (childStdoutTail || decodedTail) process.stdout.write(childStdoutTail + decodedTail)
+  childStdoutTail = ""
+})
 
 function writeChildOutput(data: Buffer): void {
-  const text = childStdoutTail + data.toString()
+  const text = childStdoutTail + childStdoutDecoder.write(data)
   const lastNewline = text.lastIndexOf("\n")
   if (lastNewline === -1) {
     childStdoutTail = text
@@ -139,6 +199,10 @@ if (child.stdout) {
 }
 
 function writeError(id: unknown, code: number, message: string): void {
+  // Once shutdown starts, stdout belongs only to the target-output drain. In particular, an
+  // approval that ignores cancellation must not append a JSON-RPC refusal directly after an
+  // unterminated target tail that has already reached EOF.
+  if (shuttingDown) return
   process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id: id ?? null, error: { code, message } })}\n`)
 }
 
@@ -149,6 +213,7 @@ function forwardToChild(payload: string): void {
 // Gated tool calls run one at a time, in FIFO order: two mutating calls must not be reordered, and
 // serialising them also caps how many approval prompts a runaway agent can raise at once.
 let messageQueue: Promise<void> = Promise.resolve()
+let pendingToolCalls = 0
 
 interface ToolCall {
   id: unknown
@@ -304,19 +369,24 @@ rl.on("line", (line) => {
   }
 
   const { call, forward } = classified
+  pendingToolCalls++
   messageQueue = messageQueue
-    .then(() => processToolCall(call, forward))
-    .catch((err: unknown) => {
-      // processToolCall handles its own failures; this is the backstop for one that escapes. It
-      // refuses — it must never fall back to forwarding, which is what the old catch did.
-      console.error("[Intyga Proxy] Error processing message:", err)
-      writeError(call.id, -32603, `Intyga Proxy error: ${(err as Error).message}`)
+    .then(() => (shuttingDown ? undefined : processToolCall(call, forward)))
+    .finally(() => {
+      pendingToolCalls--
+      if (
+        shuttingDown &&
+        (child.exitCode !== null || child.signalCode !== null) &&
+        pendingToolCalls === 0 &&
+        forcedParentStop
+      )
+        clearTimeout(forcedParentStop)
     })
 })
 
 async function processToolCall(call: ToolCall, forward: string): Promise<void> {
   const { id, name, args: handlerArgs } = call
-  try {
+  const result = await runGateOperation(async () => {
     // 1. Evaluate policy — the same gate the in-process wrapper uses, so the two enforcement paths
     //    cannot reach different verdicts for the same call.
     const decision = evaluatePolicy(name, handlerArgs, {
@@ -339,12 +409,14 @@ async function processToolCall(call: ToolCall, forward: string): Promise<void> {
       params: handlerArgs,
       actionDescription: `Authorize action '${name}' with parameters: ${JSON.stringify(handlerArgs)}`,
       agentV1,
+      executionTrust,
+      signal: shutdown.signal,
     })
 
     if (outcome.outcome === "approved") {
       // Rebuilt from the approved call, not the original line: the target executes exactly the
       // parameters the human was shown and the policy was evaluated against (`rebuildToolCall`).
-      forwardToChild(forward)
+      if (!shuttingDown) forwardToChild(forward)
       return
     }
 
@@ -354,11 +426,10 @@ async function processToolCall(call: ToolCall, forward: string): Promise<void> {
     }
 
     writeError(id, -32603, `Intyga Gateway Error: ${outcome.reason}`)
-  } catch (err) {
-    // Fail closed. This catch used to write the original line to the target server, so any throw in
-    // the gate — a malformed policy manifest was enough — forwarded the tool call ungated, with no
-    // error to the client and no log. A gate that opens when it breaks is worse than no gate.
-    console.error("[Intyga Proxy] Gate failed, refusing:", err)
-    writeError(id, -32603, `Intyga Proxy error: the approval gate failed, so the call was refused.`)
+  })
+  if (!result.ok) {
+    // Fail closed without exposing the RP/provider exception to the untrusted MCP caller.
+    console.error("[Intyga Proxy] Gate failed, refusing:", result.error)
+    writeError(id, -32603, "Intyga Proxy error: the approval gate failed, so the call was refused.")
   }
 }
