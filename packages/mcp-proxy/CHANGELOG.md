@@ -3,6 +3,11 @@
 All notable changes to `@intyga/mcp-proxy` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [3.1.1]
+
+- Raise the published `@intyga/mcp-sdk` dependency floor to `^3.1.1`, so fresh installs
+  include the MCP SDK 1.32.2 runtime update. Proxy command-line behavior is unchanged.
+
 ## [3.1.0]
 
 - Trust modules may supply `enrolledDeviceKeys` and a `requireEnrolledDevice` floor

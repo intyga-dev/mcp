@@ -12,6 +12,9 @@ const moduleNames = expectedBuiltModules(sourceNames, builtNames)
 const distFiles = moduleNames.map((file) => path.join(root, "dist", file))
 const before = new Map(distFiles.map((file) => [file, sha256File(file)]))
 const raw = fs.mkdtempSync(path.join(os.tmpdir(), "intyga-proxy-coverage-"))
+// The raw V8 output (~35 MB) is only read below. Remove it however the run ends — a test failure,
+// a thrown check or success — since every run used to leave one behind in os.tmpdir().
+process.on("exit", () => fs.rmSync(raw, { recursive: true, force: true }))
 const tsx = path.resolve(root, "../../node_modules/.bin/tsx")
 const run = spawnSync(
   tsx,

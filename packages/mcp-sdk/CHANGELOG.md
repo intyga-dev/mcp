@@ -3,6 +3,12 @@
 All notable changes to `@intyga/mcp-sdk` are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [3.1.1]
+
+- Update the runtime `@modelcontextprotocol/sdk` pin to 1.32.2. Consumers that pass an
+  `McpServer` to the wrapper must use the same MCP SDK version to avoid incompatible private
+  class types. The approval and verification behavior is unchanged.
+
 ## [3.1.0]
 
 - `executionTrust` and `agentV1` accept an optional RP-owned `enrolledDeviceKeys` (DIV §4.3.2,

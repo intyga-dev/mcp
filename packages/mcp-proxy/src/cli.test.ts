@@ -10,13 +10,15 @@ import { createServer } from "node:http"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { test } from "node:test"
+import { after, test } from "node:test"
 import { fileURLToPath } from "node:url"
 import { canonicalIntentPayload } from "@intyga/mcp-schemas"
 
 const CLI = process.env.MCP_PROXY_TEST_CLI ?? fileURLToPath(new URL("./cli.ts", import.meta.url))
 const cliNodeArgs = (args: string[]) => [...(CLI.endsWith(".ts") ? ["--import", "tsx"] : []), CLI, ...args]
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "intyga-proxy-test-"))
+// Every run used to leave this directory behind in os.tmpdir().
+after(() => fs.rmSync(tmp, { recursive: true, force: true }))
 const serviceTrustModule = path.join(tmp, "execution-trust.mjs")
 fs.writeFileSync(
   serviceTrustModule,
